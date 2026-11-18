@@ -26,15 +26,15 @@ jobs:
     # The same base image as ./dev, so CI and local builds use one toolchain.
     container: docker.io/library/rust:1.99-trixie
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
       - name: Toolchain extras (as ./dev sets them up)
         run: |
           apt-get update -qq
           apt-get install -y -qq --no-install-recommends libclang-dev
           rustup component add rustfmt clippy llvm-tools
           rustup target add thumbv7em-none-eabihf
-      - uses: taiki-e/install-action@cargo-llvm-cov
-      - uses: Swatinem/rust-cache@v2
+      - uses: taiki-e/install-action@c2e5d2ce8920c881761c4cabb41434daa1f95687 # cargo-llvm-cov
+      - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2.9.3
         with:
           workspaces: |
             .
@@ -46,7 +46,7 @@ jobs:
       - name: Tests with coverage
         run: ./coverage rust
       - run: cargo test --locked -p kb-sim -p kb-docs-media
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
           name: coverage-rust
           path: target/coverage/rust.lcov
@@ -65,14 +65,14 @@ jobs:
     name: .NET
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-dotnet@v4
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: actions/setup-dotnet@0f4a354dd5547a28c70b7853dbd95d5b67886e73 # v6.1.0
         with:
-          dotnet-version: 10.0.x
-      - uses: dtolnay/rust-toolchain@master
+          global-json-file: emulator/global.json
+      - uses: dtolnay/rust-toolchain@df2a88e9fe4098bad09cb42c3dec7187f15861fc # master
         with:
           toolchain: "1.99"
-      - uses: Swatinem/rust-cache@v2
+      - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2.9.3
       # The app and its tests load the firmware logic through FFI.
       - run: cargo build --release --locked -p kb-emu
       - run: dotnet build emulator/KbEmulator.slnx -c Release
@@ -83,13 +83,13 @@ jobs:
         run: ./coverage dotnet
         env:
           DOTNET_TEST_ARGS: -c Release --no-build
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
           name: coverage-dotnet
           path: target/coverage/dotnet/*.cobertura.xml
           if-no-files-found: error
       # For the sonar job's build (the app copies it to its output).
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
           name: kb-emu
           path: target/release/libkb_emu.so
@@ -114,25 +114,25 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 20
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           fetch-depth: 0 # blame information: new code, issue assignment
-      - uses: actions/setup-dotnet@v4
+      - uses: actions/setup-dotnet@0f4a354dd5547a28c70b7853dbd95d5b67886e73 # v6.1.0
         with:
-          dotnet-version: 10.0.x
-      - uses: actions/download-artifact@v4
+          global-json-file: emulator/global.json
+      - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
         with:
           name: coverage-rust
           path: target/coverage
-      - uses: actions/download-artifact@v4
+      - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
         with:
           name: coverage-dotnet
           path: target/coverage/dotnet
-      - uses: actions/download-artifact@v4
+      - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
         with:
           name: kb-emu
           path: target/release
-      - uses: actions/cache@v4
+      - uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
         with:
           path: ~/.sonar/cache
           key: ${{ runner.os }}-sonar
@@ -165,12 +165,12 @@ jobs:
     name: Scripts and docs
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
       - name: shellcheck
         run: shellcheck -S style hil dev emulate docs-media size-report coverage fw-nrf/build-uf2 fw-nrf/build-bootloader
       - name: ruff
         run: pipx run ruff check fw-nrf/dfu-verify.py
-      - uses: DavidAnson/markdownlint-cli2-action@v19
+      - uses: DavidAnson/markdownlint-cli2-action@05f32210e84442804257b2a6f20b273450ec8265 # v19
         with:
           globs: |
             README.md

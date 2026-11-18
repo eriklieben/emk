@@ -849,7 +849,10 @@ fn studio_save_keeps_the_edit_and_cleans() {
 fn studio_save_to_an_unwritable_file_is_a_storage_error() {
     // Arrange
     let e = Handle::new();
-    let path = "/nonexistent-dir/emk/studio.txt";
+    // A "directory" that is a regular file: unwritable even for root (CI).
+    let file = std::env::temp_dir().join(format!("emk-not-a-dir-{}", std::process::id()));
+    std::fs::write(&file, b"").expect("temp file");
+    let path = format!("{}/studio.txt", file.display());
     kb_emu_studio_set_storage_path(e.0, path.as_ptr(), path.len());
     unlock_studio(e.0, 0);
     studio_set(e.0, 0, Q, "kp:Z", 100);
@@ -860,6 +863,7 @@ fn studio_save_to_an_unwritable_file_is_a_storage_error() {
     // Assert
     assert_eq!(code, 7);
     assert!(kb_emu_studio_dirty(e.0), "still dirty");
+    std::fs::remove_file(file).ok();
 }
 
 #[test]

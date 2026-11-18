@@ -10,6 +10,11 @@
 [![Security Rating](https://sonarcloud.io/api/project_badges/measure?project=eriklieben_emk&metric=security_rating)](https://sonarcloud.io/summary/new_code?id=eriklieben_emk)
 [![Maintainability Rating](https://sonarcloud.io/api/project_badges/measure?project=eriklieben_emk&metric=sqale_rating)](https://sonarcloud.io/summary/new_code?id=eriklieben_emk)
 
+[![Rust 1.99](https://img.shields.io/badge/Rust-1.99-dea584?logo=rust)](https://www.rust-lang.org)
+[![.NET 10](https://img.shields.io/badge/.NET-10-512BD4?logo=dotnet)](https://dotnet.microsoft.com)
+[![Keyboard: Corne v3](https://img.shields.io/badge/keyboard-Corne%20v3-2ea44f)](https://github.com/foostan/crkbd)
+[![Controller: nice!nano v2](https://img.shields.io/badge/controller-nice!nano%20v2-6f42c1)](https://nicekeyboards.com/nice-nano)
+
 **Rust firmware for split Corne keyboards on the nice!nano.** EMK (Erik's Mechanical Keyboard)
 runs both halves over Bluetooth with animated OLED screens, 10 computer profiles plus USB,
 pairing with a typed code, smooth mouse keys and live keymap editing. A desktop app emulates the

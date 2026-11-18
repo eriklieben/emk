@@ -186,7 +186,18 @@ public sealed partial class FlashJob
         await exited.Task.ConfigureAwait(false);
         // The last output lines: wait for the pipes to close, but not for a
         // child that outlived the script (a cancel, a background job).
-        if (!_cancelled) await Task.WhenAny(process.WaitForExitAsync(), Task.Delay(2000)).ConfigureAwait(false);
+        if (!_cancelled)
+        {
+            using var drain = new CancellationTokenSource(TimeSpan.FromSeconds(2));
+            try
+            {
+                await process.WaitForExitAsync(drain.Token).ConfigureAwait(false);
+            }
+            catch (OperationCanceledException)
+            {
+                // A child kept the pipes open: report what was read so far.
+            }
+        }
         lock (_lock) _process = null;
         return (process.ExitCode, lastError);
     }
