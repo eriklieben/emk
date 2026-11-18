@@ -6,6 +6,36 @@ using KbEmulator.Bench;
 namespace KbEmulator.Tests;
 
 /// <summary>A window on a hand-moved clock, for UI tests.</summary>
+/// <summary>
+/// A small repository of its own for Flash and Security, so the windows look the
+/// same on every machine: two made-up keyboards in <c>.hil-halves</c>, no
+/// packages, no signing key, nothing on USB.
+/// </summary>
+internal static class SampleRepo
+{
+    private static readonly Lazy<DeviceSources> Lazy = new(Create);
+
+    public static DeviceSources Sources => Lazy.Value;
+
+    private static DeviceSources Create()
+    {
+        var root = Path.Combine(Path.GetTempPath(), $"emk-sample-repo-{Guid.NewGuid():N}");
+        Directory.CreateDirectory(Path.Combine(root, "emulator"));
+        Directory.CreateDirectory(Path.Combine(root, "usb"));
+        File.WriteAllText(Path.Combine(root, "hil"), "#!/bin/sh\n");
+        File.WriteAllText(Path.Combine(root, HalfRecord.FileName),
+            "kb_a left 0123456789ABCDEF uf2\nkb_a right FEDCBA9876543210 uf2\n" +
+            "kb_b left 00112233445566AA uf2\nkb_b right 00112233445566BB uf2\n");
+        return new DeviceSources
+        {
+            Repo = root,
+            KeyPath = Path.Combine(root, "no-key.pem"),
+            UsbRoot = Path.Combine(root, "usb"),
+            LogPort = () => null,
+        };
+    }
+}
+
 internal sealed class TestWindow
 {
     public uint Now;
@@ -14,7 +44,7 @@ internal sealed class TestWindow
 
     public TestWindow()
     {
-        Window = new MainWindow(Socket, new HardwarePort(() => null), () => Now);
+        Window = new MainWindow(Socket, new HardwarePort(() => null), () => Now, deviceSources: SampleRepo.Sources);
         Window.Show();
     }
 

@@ -148,7 +148,7 @@ line.
 | `#studio revert` | `#A revert ok`, then `#L` for every layer, then the `#C` list, then `#D` |
 | `#studio reset` | `#A reset ok` (then `#L` for every layer and the `#C` list) or `#A reset err <why>`, then `#U`, `#D` |
 | `#studio lock` | `#A lock ok`, then `#U` |
-| anything else starting with `#studio ` | `#A ? err syntax` |
+| anything else starting with `#studio` and a space | `#A ? err syntax` |
 
 `save`, `revert`, `reset` and the `dirty` state cover keys and combos together.
 

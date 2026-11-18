@@ -40,6 +40,7 @@ public sealed partial class MainWindow : Window
     private readonly DebugView _debug;
     private readonly TopBar _bar;
     private readonly FeatureFlags _features;
+    private readonly DeviceSources? _deviceSources;
     private readonly Dictionary<AppMode, Control> _pages = new();
     private readonly HostText _host = new(EmulatedKeyboard.UsageName);
     private readonly LogWell _hostWell = new(textMode: true) { Placeholder = "" };
@@ -78,9 +79,12 @@ public sealed partial class MainWindow : Window
     /// <param name="hardwarePort">The real keyboard's log port for Debug; default finds it by USB ID.</param>
     /// <param name="clock">Milliseconds for the emulator; tests pass their own to move time.</param>
     /// <param name="features">Optional parts; default the ones read at startup (<see cref="App.Features"/>).</param>
-    public MainWindow(string? socketPath, HardwarePort? hardwarePort = null, Func<uint>? clock = null, FeatureFlags? features = null)
+    /// <param name="deviceSources">Where Flash and Security read from; default the repository the app runs from.</param>
+    public MainWindow(string? socketPath, HardwarePort? hardwarePort = null, Func<uint>? clock = null, FeatureFlags? features = null,
+        DeviceSources? deviceSources = null)
     {
         _features = features ?? App.Features;
+        _deviceSources = deviceSources;
         _bar = new TopBar(Enum.GetValues<AppMode>().Where(m => m != AppMode.Security || _features.IsOn(FeatureFlags.Security)).ToList());
         _keyboard = new EmulatedKeyboard(clock);
         Title = "EMK";
@@ -272,7 +276,15 @@ public sealed partial class MainWindow : Window
     {
         _pages[AppMode.Emulator] = BuildEmulator();
         _pages[AppMode.Debug] = _debug;
-        var sources = new DeviceSources { Boot = () => _debug.LastBoot };
+        var given = _deviceSources ?? new DeviceSources();
+        var sources = new DeviceSources
+        {
+            Repo = given.Repo,
+            KeyPath = given.KeyPath,
+            UsbRoot = given.UsbRoot,
+            LogPort = given.LogPort,
+            Boot = () => _debug.LastBoot,
+        };
         _studio = new StudioView(_keyboard, _debug);
         _flash = new FlashView(sources);
         // Security is behind a feature flag: without it there is no page to reach.
