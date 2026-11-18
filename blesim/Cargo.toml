@@ -1,0 +1,35 @@
+[package]
+name = "blesim"
+description = "An in-memory Bluetooth LE controller for testing trouble-host stacks on Linux, without radio hardware."
+edition.workspace = true
+version.workspace = true
+license.workspace = true
+publish = false
+
+[lints]
+workspace = true
+
+[dependencies]
+# The versions trouble-host 0.8 builds on (as in fw-nrf).
+bt-hci = "0.10"
+embedded-io = "0.7"
+trouble-host = { version = "0.8.0", default-features = false, features = ["peripheral", "central", "scan", "gatt", "derive", "default-packet-pool", "security", "serde"] }
+embassy-futures = "0.1.2"
+embassy-time = { version = "0.5.1", features = ["std", "generic-queue-64"] }
+# A critical section for std, for embassy-sync users of the stacks under test.
+critical-section = { version = "1.2", features = ["std"] }
+
+[features]
+# trouble-host's own logging through the `log` crate (the tests print it with BLESIM_LOG=1).
+log = ["trouble-host/log"]
+
+[dev-dependencies]
+log = "0.4"
+# The keyboard's Bluetooth code, run on the air (tests/kb_*.rs).
+kb-ble = { path = "../ble" }
+# The key loop's pairing prompt (typing the code), in tests/pairing.
+kb-core = { path = "../core" }
+embedded-storage-async = "0.4.1"
+# Used by the code trouble's #[gatt_server] generates.
+static_cell = "2.1.1"
+embassy-sync = "0.8.0"

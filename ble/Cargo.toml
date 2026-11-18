@@ -1,0 +1,30 @@
+[package]
+name = "kb-ble"
+description = "The keyboard's Bluetooth logic (split link, HID to the computer, bonds, log ring) on trouble-host, without any chip-specific code."
+edition.workspace = true
+version.workspace = true
+license.workspace = true
+publish = false
+
+[lints]
+workspace = true
+
+[dependencies]
+# As in fw-nrf, which runs this on Nordic's SoftDevice Controller.
+bt-hci = "0.10"
+embassy-futures = "0.1.2"
+embassy-sync = "0.8.0"
+embassy-time = "0.5.1"
+embedded-storage-async = "0.4.1"
+kb-core = { path = "../core" }
+sequential-storage = { version = "7.1", features = ["postcard"] }
+serde = { version = "1", default-features = false, features = ["derive"] }
+# Used by the code trouble's #[gatt_server] generates.
+static_cell = "2.1.1"
+trouble-host = { version = "0.8.0", default-features = false, features = ["peripheral", "central", "scan", "gatt", "derive", "default-packet-pool", "security", "serde", "gatt-client-notification-queue-size-8", "gatt-client-notification-max-subscribers-4"] }
+
+[dev-dependencies]
+# A critical section for the host tests (the firmware has MPSL's).
+critical-section = { version = "1.2", features = ["std"] }
+# A clock for the host tests (`notify`).
+embassy-time = { version = "0.5.1", features = ["std", "generic-queue-64"] }

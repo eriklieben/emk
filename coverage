@@ -1,0 +1,120 @@
+#!/usr/bin/env bash
+# Line coverage of the tests, Rust and .NET, per part and in total; fails when a
+# total is under 85 % (COVERAGE_MIN).
+#
+#   ./coverage           both
+#   ./coverage rust      cargo llvm-cov (in the dev container; in CI, directly)
+#   ./coverage dotnet    dotnet test --coverage (Cobertura)
+#
+# Reports: target/coverage/rust.lcov (paths relative to the repository) and
+# target/coverage/dotnet/*.cobertura.xml. Left out of the figures (docs/development.md,
+# "Tests and tools"): the tools and test aids sim, blesim, tools/docs-media, bench,
+# size-probe, ble's test flash and the integration tests themselves; .NET's test
+# projects, DocsMedia, the Windows-only NativeWindowsHid and generated code
+# (emulator/coverage.config.xml).
+#
+# DOTNET_TEST_ARGS adds arguments to dotnet test (CI: "-c Release --no-build").
+set -euo pipefail
+cd "$(dirname "$0")"
+
+MIN=${COVERAGE_MIN:-85}
+OUT=target/coverage
+RUST_EXCLUDE=(--exclude kb-sim --exclude kb-docs-media)
+RUST_IGNORE='/(sim|blesim|tools|bench|size-probe|tests)/|/ble/src/test_flash\.rs$'
+
+# cargo llvm-cov: directly in CI (the job runs in the dev image's base), else in ./dev,
+# where cargo install put it under CARGO_HOME.
+llvm_cov() {
+  if [[ -n "${CI:-}" ]]; then
+    cargo llvm-cov "$@"
+  else
+    # shellcheck disable=SC2016 # expands inside the container
+    ./dev sh -c 'PATH=/work/.cargo-home/bin:$PATH exec cargo llvm-cov "$@"' sh "$@"
+  fi
+}
+
+rust() {
+  local root=/work
+  [[ -n "${CI:-}" ]] && root=$PWD
+  mkdir -p "$OUT"
+  llvm_cov --workspace --locked "${RUST_EXCLUDE[@]}" --no-report
+  llvm_cov report --ignore-filename-regex "$RUST_IGNORE" --lcov --output-path "$OUT/rust.lcov"
+  llvm_cov report --ignore-filename-regex "$RUST_IGNORE" --json --summary-only \
+    --output-path "$OUT/rust.json"
+  sed -i "s#^SF:$root/#SF:#" "$OUT/rust.lcov"
+  summary rust "$root" "$OUT/rust.json"
+}
+
+dotnet_() {
+  local args=()
+  read -ra args <<<"${DOTNET_TEST_ARGS:-}"
+  if [[ ! -f target/release/libkb_emu.so ]]; then
+    ./dev cargo build --release --locked -p kb-emu
+  fi
+  rm -rf "$OUT/dotnet"
+  # From emulator/: its global.json picks the Microsoft Testing Platform runner.
+  (cd emulator && dotnet test --solution KbEmulator.slnx "${args[@]}" --coverage \
+    --coverage-output-format cobertura --coverage-settings "$PWD/coverage.config.xml" \
+    --results-directory "$PWD/../$OUT/dotnet")
+  summary dotnet "$PWD" "$OUT"/dotnet/*.cobertura.xml
+}
+
+# Per part (Rust: top directory, .NET: assembly) and total; exit 1 under MIN.
+summary() {
+  python3 - "$MIN" "$@" <<'PY'
+import collections, json, sys, xml.etree.ElementTree as ET
+
+minimum, kind, root, reports = float(sys.argv[1]), sys.argv[2], sys.argv[3], sys.argv[4:]
+parts = collections.defaultdict(lambda: [0, 0])  # part -> [covered, lines]
+if kind == "rust":
+    for f in json.load(open(reports[0]))["data"][0]["files"]:
+        rel = f["filename"].removeprefix(root + "/")
+        lines = f["summary"]["lines"]
+        parts[rel.split("/")[0]][0] += lines["covered"]
+        parts[rel.split("/")[0]][1] += lines["count"]
+else:
+    # A library shows up in the report of every test project that loads it: a
+    # line is covered when any of them ran it.
+    hits = collections.defaultdict(dict)  # (assembly, file) -> line -> hit
+    for report in reports:
+        for package in ET.parse(report).getroot().iter("package"):
+            for cls in package.iter("class"):
+                seen = hits[(package.get("name"), cls.get("filename"))]
+                for line in cls.iter("line"):
+                    n = int(line.get("number"))
+                    seen[n] = seen.get(n, False) or int(line.get("hits")) > 0
+    for (assembly, _), seen in hits.items():
+        parts[assembly][0] += sum(seen.values())
+        parts[assembly][1] += len(seen)
+
+def pct(covered, lines):
+    return 100.0 * covered / lines if lines else 100.0
+
+title = "Rust" if kind == "rust" else ".NET"
+for name, (covered, lines) in sorted(parts.items()):
+    mark = "" if pct(covered, lines) >= minimum else f"   (under {minimum:g} %)"
+    print(f"{title:5} {name:20} {pct(covered, lines):6.1f} %  {covered:6}/{lines:<6}{mark}")
+covered = sum(c for c, _ in parts.values())
+lines = sum(n for _, n in parts.values())
+total = pct(covered, lines)
+print(f"{title:5} {'total':20} {total:6.1f} %  {covered:6}/{lines:<6}")
+if total < minimum:
+    print(f"coverage: {title} total {total:.1f} % is under {minimum:g} %", file=sys.stderr)
+    sys.exit(1)
+PY
+}
+
+case "${1:-all}" in
+  rust) rust ;;
+  dotnet) dotnet_ ;;
+  all)
+    status=0
+    rust || status=1
+    dotnet_ || status=1
+    exit "$status"
+    ;;
+  *)
+    echo "usage: ./coverage [rust|dotnet]" >&2
+    exit 2
+    ;;
+esac

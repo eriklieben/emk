@@ -1,0 +1,101 @@
+#!/usr/bin/env bash
+# Build the left-half firmware, one .uf2 per keyboard name:
+#
+#   ./fw-nrf/build-uf2                    erik_kyb_blk, erik_kyb_wh, erik_kyb_grs
+#   ./fw-nrf/build-uf2 erik_kyb_wh        just that one
+#   SIDE=right ./fw-nrf/build-uf2 erik_kyb_wh   right half (standalone USB test build)
+#   BLE=1 ./fw-nrf/build-uf2 erik_kyb_grs       Bluetooth split: left on USB, right linked over BLE
+#   BLE=1 SIDE=right ./fw-nrf/build-uf2 erik_kyb_grs
+#   LOG=0 ...                                    without the USB serial log (src/log.rs)
+#   SIGNED=1 ...                                 `boot` asks for serial DFU (feature signed-boot)
+#   LOCK=1 ...                                   lock the debug port at first start (feature debug-lock,
+#                                                outputs named ...-locked; see docs/signed-bootloader.md)
+#
+# The name is what the computer sees (USB product name; later the Bluetooth
+# name), like CONFIG_ZMK_KEYBOARD_NAME in zmk-config. It is a constant in the
+# firmware, so it costs nothing at runtime. Output: target/fw-nrf-<side>-<name>.uf2
+# and .hex, plus a signed DFU package .zip (for halves with the signed
+# bootloader) when the signing key exists: $EMK_KEY, default
+# ~/.config/emk/keys/emk-fw.pem, signed with adafruit-nrfutil from $NRFUTIL
+# (default ~/.local/share/emk-venv/bin/adafruit-nrfutil) and checked with
+# fw-nrf/dfu-verify.py.
+#
+# EMK_NO_CONTAINER=1 builds with the local Rust toolchain instead of ./dev
+# (CI, where the toolchain already is the container).
+#
+# Flash: double-tap reset on the nice!nano, copy the file onto the NICENANO drive
+# (UF2 bootloader), or ./hil flash (either bootloader).
+set -euo pipefail
+cd "$(dirname "$0")/.."
+
+side=${SIDE:-left}
+[[ "$side" == left || "$side" == right ]] || { echo "SIDE must be left or right" >&2; exit 2; }
+mode=usb-only
+suffix=""
+log=",usb-log"
+extra=""
+locked=""
+[[ "${LOG:-1}" == 0 ]] && log=""
+if [[ "${BLE:-0}" == 1 ]]; then mode=ble; suffix="-ble"; fi
+[[ "${SIGNED:-0}" == 1 ]] && extra+=",signed-boot"
+if [[ "${LOCK:-0}" == 1 ]]; then extra+=",debug-lock"; locked="-locked"; fi
+names=("$@")
+[[ ${#names[@]} -eq 0 ]] && names=(erik_kyb_blk erik_kyb_wh erik_kyb_grs)
+
+KEY=${EMK_KEY:-$HOME/.config/emk/keys/emk-fw.pem}
+NRFUTIL=${NRFUTIL:-$HOME/.local/share/emk-venv/bin/adafruit-nrfutil}
+VENV_PY=$(dirname "$NRFUTIL")/python3
+BL=target/bootloader
+S140_6_1_1_FWID=0x00B6 # --sd-req: the SoftDevice the bootloader must find (exactly this one, no 0xFFFE)
+
+run=(./dev sh -c)
+[[ "${EMK_NO_CONTAINER:-0}" == 1 ]] && run=(sh -c)
+
+for name in "${names[@]}"; do
+  [[ "$name" =~ ^[A-Za-z0-9_.-]{1,30}$ ]] || { echo "invalid keyboard name: $name" >&2; exit 2; }
+  out=target/fw-nrf-$side$suffix-$name$locked
+  "${run[@]}" "
+set -e
+cd fw-nrf
+KB_NAME='$name' cargo build -q --release --no-default-features --features $side,$mode$log$extra
+B=\$(rustc --print sysroot)/lib/rustlib/x86_64-unknown-linux-gnu/bin
+\$B/llvm-objcopy -O binary target/thumbv7em-none-eabihf/release/fw-nrf /tmp/fw.bin
+mkdir -p ../target
+\$B/llvm-objcopy -O ihex target/thumbv7em-none-eabihf/release/fw-nrf ../$out.hex
+python3 - /tmp/fw.bin ../$out.uf2 <<'PY'
+# UF2 format: https://github.com/microsoft/uf2 (512-byte blocks, 256 data bytes each)
+import struct, sys
+FAMILY_NRF52840 = 0xADA52840
+BASE = 0x26000  # application start, after the SoftDevice area (memory.x)
+with open(sys.argv[1], 'rb') as f:
+    data = f.read()
+blocks = [data[i:i + 256] for i in range(0, len(data), 256)]
+out = bytearray()
+for n, chunk in enumerate(blocks):
+    header = struct.pack('<IIIIIIII', 0x0A324655, 0x9E5D5157, 0x00002000,
+                         BASE + n * 256, 256, n, len(blocks), FAMILY_NRF52840)
+    out += header + chunk.ljust(476, b'\0') + struct.pack('<I', 0x0AB16F30)
+with open(sys.argv[2], 'wb') as f:
+    f.write(out)
+print(f'{sys.argv[2]}: {len(data)} bytes in {len(blocks)} blocks at 0x{BASE:X}')
+PY
+"
+  if [[ -f $KEY && -x $NRFUTIL ]]; then
+    rm -f "$out.zip"
+    "$NRFUTIL" dfu genpkg --dev-type 0x0052 --sd-req "$S140_6_1_1_FWID" \
+      --application "$out.hex" --key-file "$KEY" "$out.zip" >/dev/null
+    check=(--key-file "$KEY")
+    # Also against the key inside the built bootloader, if there is one.
+    if [[ -f $BL/nice_nano_bootloader-0.11.0-signed.elf ]]; then
+      check=(--elf "$BL/nice_nano_bootloader-0.11.0-signed.elf" --uf2 "$BL/update-nice_nano_bootloader-0.11.0-signed_nosd.uf2")
+    fi
+    "$VENV_PY" -I fw-nrf/dfu-verify.py package "$out.zip" "${check[@]}" --app-hex "$out.hex" >"$out.verify.txt" ||
+      { cat "$out.verify.txt" >&2; echo "build-uf2: $out.zip failed verification" >&2; exit 1; }
+    echo "$out.zip: signed, verified ($out.verify.txt)"
+  else
+    echo "(no signing key at $KEY or no $NRFUTIL: no signed .zip)"
+  fi
+  if [[ -n $locked ]]; then
+    echo "WARNING: $out.* locks the debug port at its first start (only a full erase undoes it)"
+  fi
+done

@@ -1,0 +1,40 @@
+# Bare-metal nRF52840 binary that links all firmware logic written so far,
+# to measure how much flash and RAM it takes. Not the real firmware.
+[package]
+name = "size-probe"
+edition = "2024"
+version = "0.1.0"
+license = "MIT"
+publish = false
+
+# Standalone: built only for the ARM target, not with the host workspace.
+[workspace]
+
+# The same lint levels as the main workspace (../Cargo.toml, [workspace.lints]).
+[lints.rust]
+unsafe_op_in_unsafe_fn = "deny"
+
+[lints.clippy]
+pedantic = { level = "warn", priority = -1 }
+redundant_clone = "warn"
+needless_collect = "warn"
+use_self = "warn"
+undocumented_unsafe_blocks = "warn"
+# Allowed on purpose; the reasons are in ../Cargo.toml.
+cast_possible_truncation = "allow"
+cast_possible_wrap = "allow"
+cast_sign_loss = "allow"
+cast_precision_loss = "allow"
+similar_names = "allow"
+
+[dependencies]
+cortex-m-rt = "0.7.7"
+kb-core = { path = "../core" }
+kb-display = { path = "../display" }
+
+[profile.release]
+opt-level = "s"
+lto = true
+codegen-units = 1
+debug = false
+panic = "abort"

@@ -1,0 +1,21 @@
+<Project Sdk="Microsoft.NET.Sdk">
+
+  <!-- Renders the app's keyboard scenes (PNG frames) and screenshots for the README; run by ./docs-media. -->
+  <PropertyGroup>
+    <OutputType>Exe</OutputType>
+    <AssemblyName>EmkDocsMedia</AssemblyName>
+    <RootNamespace>KbEmulator.DocsMedia</RootNamespace>
+    <IsPackable>false</IsPackable>
+  </PropertyGroup>
+
+  <ItemGroup>
+    <PackageReference Include="Avalonia.Headless" Version="12.1.6" />
+    <PackageReference Include="Avalonia.Skia" Version="12.1.6" />
+  </ItemGroup>
+
+  <ItemGroup>
+    <ProjectReference Include="..\App\KbEmulator.csproj" />
+    <ProjectReference Include="..\HostProtocol\Kb.HostProtocol.csproj" />
+  </ItemGroup>
+
+</Project>

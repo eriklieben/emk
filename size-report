@@ -1,0 +1,48 @@
+#!/usr/bin/env bash
+# Build the nRF52840 firmware (fw-nrf) and write target/size-report.json
+# (shown in the emulator's chip panel).
+set -euo pipefail
+cd "$(dirname "$0")"
+# Single quotes on purpose: the script expands inside the container.
+# shellcheck disable=SC2016
+./dev sh -c '
+set -e
+cd fw-nrf
+cargo build -q --release --no-default-features --features left,ble
+B=$(rustc --print sysroot)/lib/rustlib/x86_64-unknown-linux-gnu/bin
+$B/llvm-size -A target/thumbv7em-none-eabihf/release/fw-nrf > /tmp/sections.txt
+mkdir -p ../target
+python3 - /tmp/sections.txt ../target/size-report.json <<PY
+import json, sys, datetime
+sections = {}
+with open(sys.argv[1]) as f:
+    for line in f:
+        parts = line.split()
+        if len(parts) == 3 and parts[0].startswith("."):
+            sections[parts[0]] = int(parts[1])
+flash_used = sum(sections.get(s, 0) for s in (".vector_table", ".text", ".rodata", ".data"))
+ram_used = sum(sections.get(s, 0) for s in (".data", ".bss", ".uninit"))
+report = {
+    "chip": "nRF52840",
+    "board": "nice!nano v2",
+    "flashTotal": 1024 * 1024,
+    "flashRegions": [
+        {"name": "MBR + SoftDevice area", "size": 0x26000},
+        {"name": "Firmware", "size": 0xBE000},
+        {"name": "Bond storage", "size": 0x8000},
+        {"name": "Settings storage", "size": 0x8000},
+        {"name": "UF2 bootloader", "size": 0xC000},
+    ],
+    "flashUsed": flash_used,
+    "ramTotal": 256 * 1024,
+    "ramUsed": ram_used,
+    "sections": sections,
+    "includes": "fw-nrf left half: Embassy, USB keyboard, Bluetooth stack (nrf-sdc + trouble) with the split link, matrix scan, keymap engine, OLED, battery, power management",
+    "excludes": "Bluetooth to the computer, Raw HID on hardware, stack",
+    "generated": datetime.datetime.now(datetime.timezone.utc).isoformat(timespec="seconds"),
+}
+with open(sys.argv[2], "w") as f:
+    json.dump(report, f, indent=2)
+print(f"flash: {flash_used} bytes of {0xBE000} ({flash_used / 0xBE000:.1%}), ram: {ram_used} bytes of {256*1024} ({ram_used / (256*1024):.1%})")
+PY
+'

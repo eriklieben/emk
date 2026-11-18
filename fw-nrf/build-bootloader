@@ -1,0 +1,103 @@
+#!/usr/bin/env bash
+# Build the Adafruit nRF52 bootloader 0.11.0 for the nice!nano with signed
+# firmware only (SIGNED_FW=1): no UF2 drive, no CURRENT.UF2, serial/BLE DFU
+# accept only packages signed with our key. See docs/signed-bootloader.md.
+#
+#   ./fw-nrf/build-bootloader          → target/bootloader/
+#
+# Source: build/bootloader (cloned here at tag 0.11.0, commit pinned below).
+# Toolchain: podman image localhost/emk-blbuild (Debian bookworm,
+# arm-none-eabi-gcc 12.2; upstream CI uses 12.3). Key: $EMK_KEY, default
+# ~/.config/emk/keys/emk-fw.pem; only its public half goes into the build.
+#
+# Outputs (target/bootloader/), <kind> = signed or unsigned (the plain UF2
+# bootloader of the same release, only for going back):
+#   update-nice_nano_bootloader-0.11.0-<kind>_nosd.uf2  self-update: copy onto a NICENANO drive
+#   nice_nano_bootloader-0.11.0-<kind>_nosd.hex         bootloader + MBR + UICR, for an SWD probe
+#   nice_nano_bootloader-0.11.0-<kind>_s140_6.1.1.hex   MBR + S140 6.1.1 + bootloader + UICR, for an
+#                                                       SWD probe after a full erase
+#   nice_nano_bootloader-0.11.0-<kind>.elf / .hex       bootloader alone (symbols / DFU input)
+#   rollback-to-uf2-nice_nano_bootloader-0.11.0.zip     signed bootloader DFU package: signed → unsigned
+#   pubkey.txt                                          the Qx/Qy compiled into the signed one
+#
+# FORCE_UF2 is never set: it re-enables the unsigned UF2 path.
+set -euo pipefail
+cd "$(dirname "$0")/.."
+
+TAG=0.11.0
+COMMIT=c67f0bcf0fa8e841426335b1bbde91cda6ca1f50
+REPO=https://github.com/adafruit/Adafruit_nRF52_Bootloader.git
+SRC=build/bootloader
+IMAGE=localhost/emk-blbuild:latest
+KEY=${EMK_KEY:-$HOME/.config/emk/keys/emk-fw.pem}
+NRFUTIL=${NRFUTIL:-$HOME/.local/share/emk-venv/bin/adafruit-nrfutil}
+OUT=target/bootloader
+BOARD=nice_nano
+
+die() { echo "build-bootloader: $*" >&2; exit 1; }
+[[ -f $KEY ]] || die "no signing key at $KEY (adafruit-nrfutil keys --gen-key, see docs/signed-bootloader.md)"
+[[ -x $NRFUTIL ]] || die "no adafruit-nrfutil at $NRFUTIL (see docs/signed-bootloader.md)"
+[[ -z ${FORCE_UF2:-} ]] || die "FORCE_UF2 is set in the environment: refusing (it disables signature checks)"
+
+if [[ ! -d $SRC/.git ]]; then
+  mkdir -p build
+  git clone -q --depth 1 --branch "$TAG" --recurse-submodules --shallow-submodules "$REPO" "$SRC"
+fi
+[[ $(git -C "$SRC" rev-parse HEAD) == "$COMMIT" ]] || die "$SRC is not at $TAG ($COMMIT)"
+[[ -z $(git -C "$SRC" status --porcelain --ignore-submodules=none) ]] || die "$SRC has local changes"
+
+vk=$("$NRFUTIL" keys --show-vk code "$KEY")
+qx=$(sed -n 's/^static uint8_t Qx\[\] = { \(.*\) };$/\1/p' <<<"$vk" | tr -d ' ')
+qy=$(sed -n 's/^static uint8_t Qy\[\] = { \(.*\) };$/\1/p' <<<"$vk" | tr -d ' ')
+[[ $qx =~ ^(0x[0-9a-f]{2},){31}0x[0-9a-f]{2}$ && $qy =~ ^(0x[0-9a-f]{2},){31}0x[0-9a-f]{2}$ ]] || die "could not read Qx/Qy from $KEY"
+
+if ! podman image exists "$IMAGE"; then
+  echo "creating $IMAGE ..." >&2
+  podman rm -f emk-blbuild-setup >/dev/null 2>&1 || true
+  podman run --name emk-blbuild-setup docker.io/library/debian:bookworm sh -c \
+    'apt-get update -qq && apt-get install -y -qq --no-install-recommends gcc-arm-none-eabi libnewlib-arm-none-eabi make python3 python3-intelhex git ca-certificates >/dev/null && rm -rf /var/lib/apt/lists/*'
+  podman commit -q emk-blbuild-setup "$IMAGE" >/dev/null
+  podman rm emk-blbuild-setup >/dev/null
+fi
+
+name=${BOARD}_bootloader-$TAG
+# Both builds in one container run, each in its own build directory:
+#   signed:   SIGNED_FW=1 with our key (what goes onto the keyboard)
+#   unsigned: the plain UF2 bootloader of the same release, only as the way
+#             back (rollback package below, or an SWD probe)
+podman run --rm --userns=keep-id -e HOME=/tmp -v "$PWD/$SRC:/src" -w /src "$IMAGE" sh -c "
+set -e
+git config --global --add safe.directory '*'
+for kind in signed unsigned; do
+  b=_build/\$kind
+  rm -rf \$b
+  if [ \$kind = signed ]; then flags=\"SIGNED_FW=1 SIGNED_FW_QX=$qx SIGNED_FW_QY=$qy\"; else flags=; fi
+  echo \"== \$kind\"
+  make -s BOARD=$BOARD BUILD=\$b \$flags PYTHON=python3 \
+    \$b/$name.out \$b/${name}_nosd.hex \$b/update-${name}_nosd.uf2 \$b/${name}_s140_6.1.1.hex
+done
+"
+mkdir -p "$OUT"
+for kind in signed unsigned; do
+  b=$SRC/_build/$kind
+  cp "$b/$name.out" "$OUT/$name-$kind.elf"
+  cp "$b/$name.hex" "$OUT/$name-$kind.hex"
+  cp "$b/${name}_nosd.hex" "$OUT/$name-${kind}_nosd.hex"
+  cp "$b/update-${name}_nosd.uf2" "$OUT/update-$name-${kind}_nosd.uf2"
+  cp "$b/${name}_s140_6.1.1.hex" "$OUT/$name-${kind}_s140_6.1.1.hex"
+done
+printf 'SIGNED_FW_QX=%s\nSIGNED_FW_QY=%s\n' "$qx" "$qy" >"$OUT/pubkey.txt"
+
+# The way back without a probe: a signed bootloader update (device revision
+# 52840 is what the bootloader demands for one) that replaces the signed
+# bootloader with the plain UF2 one. Installing it erases the application.
+rm -f "$OUT/rollback-to-uf2-$name.zip"
+"$NRFUTIL" dfu genpkg --dev-type 0x0052 --dev-revision 52840 --sd-req 0x00B6 \
+  --bootloader "$OUT/$name-unsigned.hex" --key-file "$KEY" "$OUT/rollback-to-uf2-$name.zip" >/dev/null
+
+py=$(dirname "$NRFUTIL")/python3
+"$py" -I fw-nrf/dfu-verify.py pubkey --key-file "$KEY" --elf "$OUT/$name-signed.elf" \
+  --uf2 "$OUT/update-$name-signed_nosd.uf2" --hex "$OUT/$name-signed_nosd.hex"
+"$py" -I fw-nrf/dfu-verify.py package "$OUT/rollback-to-uf2-$name.zip" --elf "$OUT/$name-signed.elf" \
+  --uf2 "$OUT/update-$name-signed_nosd.uf2" | tail -2
+ls -l "$OUT"

@@ -1,0 +1,178 @@
+# Checks on every push to main and every pull request. Nothing here needs
+# hardware or the signing key.
+name: CI
+
+# On main the release workflow runs these checks first (workflow_call).
+on:
+  push:
+    branches-ignore: [main]
+  pull_request:
+  workflow_call:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ci-${{ github.ref }}-${{ github.event_name }}
+  cancel-in-progress: true
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  rust:
+    name: Rust
+    runs-on: ubuntu-latest
+    # The same base image as ./dev, so CI and local builds use one toolchain.
+    container: docker.io/library/rust:1.99-trixie
+    steps:
+      - uses: actions/checkout@v4
+      - name: Toolchain extras (as ./dev sets them up)
+        run: |
+          apt-get update -qq
+          apt-get install -y -qq --no-install-recommends libclang-dev
+          rustup component add rustfmt clippy llvm-tools
+          rustup target add thumbv7em-none-eabihf
+      - uses: taiki-e/install-action@cargo-llvm-cov
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: |
+            .
+            fw-nrf
+      - run: cargo fmt --all --check
+      - run: cargo clippy --workspace --all-targets --locked -- -D warnings
+      # Every test of the workspace, with line coverage (cargo llvm-cov); fails under 85 %. The
+      # tools it leaves out of the figures (./coverage, docs/development.md) are tested on their own.
+      - name: Tests with coverage
+        run: ./coverage rust
+      - run: cargo test --locked -p kb-sim -p kb-docs-media
+      - uses: actions/upload-artifact@v4
+        with:
+          name: coverage-rust
+          path: target/coverage/rust.lcov
+          if-no-files-found: error
+      - name: Firmware, every feature set build-uf2 makes
+        working-directory: fw-nrf
+        run: |
+          cargo fmt --check
+          for f in left,usb-only,usb-log right,usb-only,usb-log left,ble,usb-log right,ble,usb-log left,ble right,ble left,ble,usb-log,signed-boot; do
+            echo "::group::$f"
+            cargo clippy --locked --release --no-default-features --features "$f" -- -D warnings
+            echo "::endgroup::"
+          done
+
+  dotnet:
+    name: .NET
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-dotnet@v4
+        with:
+          dotnet-version: 10.0.x
+      - uses: dtolnay/rust-toolchain@master
+        with:
+          toolchain: "1.99"
+      - uses: Swatinem/rust-cache@v2
+      # The app and its tests load the firmware logic through FFI.
+      - run: cargo build --release --locked -p kb-emu
+      - run: dotnet build emulator/KbEmulator.slnx -c Release
+        env:
+          CI: "true"
+      # Line coverage (Cobertura, emulator/coverage.config.xml); fails under 85 %.
+      - name: Tests with coverage
+        run: ./coverage dotnet
+        env:
+          DOTNET_TEST_ARGS: -c Release --no-build
+      - uses: actions/upload-artifact@v4
+        with:
+          name: coverage-dotnet
+          path: target/coverage/dotnet/*.cobertura.xml
+          if-no-files-found: error
+      # For the sonar job's build (the app copies it to its output).
+      - uses: actions/upload-artifact@v4
+        with:
+          name: kb-emu
+          path: target/release/libkb_emu.so
+          if-no-files-found: error
+
+  # ---------------------------------------------------------------------------------- code analysis
+  sonar:
+    name: SonarQube Cloud
+    # Off unless the repository variable SONAR_ORGANIZATION is set (and the secret SONAR_TOKEN);
+    # docs/development.md, "Code analysis". Runs for main (through the release workflow) and pull
+    # requests from branches of this repository; fork pull requests get no secrets, so it's skipped
+    # for them. Reuses the coverage of the rust and dotnet jobs: no second test run. The build here
+    # is the one the scanner observes (begin / build / end), without warnings as errors: Sonar
+    # reports issues as warnings, and the warnings gate stays in the dotnet job. It never holds up
+    # a release (continue-on-error): an outage of SonarQube Cloud isn't a failed check.
+    needs: [rust, dotnet]
+    if: >-
+      vars.SONAR_ORGANIZATION != '' &&
+      (github.event_name != 'push' || github.ref == 'refs/heads/main') &&
+      (github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository)
+    continue-on-error: true
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0 # blame information: new code, issue assignment
+      - uses: actions/setup-dotnet@v4
+        with:
+          dotnet-version: 10.0.x
+      - uses: actions/download-artifact@v4
+        with:
+          name: coverage-rust
+          path: target/coverage
+      - uses: actions/download-artifact@v4
+        with:
+          name: coverage-dotnet
+          path: target/coverage/dotnet
+      - uses: actions/download-artifact@v4
+        with:
+          name: kb-emu
+          path: target/release
+      - uses: actions/cache@v4
+        with:
+          path: ~/.sonar/cache
+          key: ${{ runner.os }}-sonar
+          restore-keys: ${{ runner.os }}-sonar
+      - name: Install the scanner (.config/dotnet-tools.json)
+        run: dotnet tool restore
+      - name: Begin analysis
+        # Settings in eng/SonarQube.Analysis.xml. The project base directory is the repository (the
+        # .NET solution is in emulator/), so the Rust, scripts and docs are analysed too.
+        env:
+          SONAR_TOKEN: ${{ secrets.SONAR_TOKEN }}
+          SONAR_ORGANIZATION: ${{ vars.SONAR_ORGANIZATION }}
+          SONAR_PROJECT_KEY: ${{ vars.SONAR_PROJECT_KEY || 'eriklieben_emk' }}
+        run: |
+          if [ -z "$SONAR_TOKEN" ]; then
+            echo "::error::SONAR_ORGANIZATION is set but the secret SONAR_TOKEN is missing."
+            exit 1
+          fi
+          dotnet dotnet-sonarscanner begin /k:"$SONAR_PROJECT_KEY" /o:"$SONAR_ORGANIZATION" \
+            /s:"$GITHUB_WORKSPACE/eng/SonarQube.Analysis.xml" /d:sonar.token="$SONAR_TOKEN" \
+            /d:sonar.projectBaseDir="$GITHUB_WORKSPACE"
+      - name: Build
+        run: dotnet build emulator/KbEmulator.slnx -c Release -p:TreatWarningsAsErrors=false
+      - name: End analysis (upload)
+        env:
+          SONAR_TOKEN: ${{ secrets.SONAR_TOKEN }}
+        run: dotnet dotnet-sonarscanner end /d:sonar.token="$SONAR_TOKEN"
+
+  lint:
+    name: Scripts and docs
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: shellcheck
+        run: shellcheck -S style hil dev emulate docs-media size-report coverage fw-nrf/build-uf2 fw-nrf/build-bootloader
+      - name: ruff
+        run: pipx run ruff check fw-nrf/dfu-verify.py
+      - uses: DavidAnson/markdownlint-cli2-action@v19
+        with:
+          globs: |
+            README.md
+            THIRD-PARTY.md
+            docs/*.md

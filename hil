@@ -1,0 +1,322 @@
+#!/usr/bin/env bash
+# Hardware-in-the-loop helpers for the keyboard on this PC: flash, read the
+# development log, drive keys through the log port, check the PC side.
+#
+#   ./hil flash left|right [file]       flash a half: the left half restarts into its bootloader by
+#                                       itself (log port); double-tap reset on the right half. UF2
+#                                       bootloader: .uf2 on the drive; signed bootloader: signed .zip
+#                                       over serial DFU (docs/signed-bootloader.md)
+#   ./hil bootinfo left|right           which bootloader a half has (UF2 drive or signed, serial DFU only)
+#   ./hil allow                         allow blocked keyboard/bootloader devices in USBGuard (temporary)
+#   ./hil log [seconds]                 print the log (whole ring first), default 3 s
+#   ./hil cmd <command> [seconds]       send a log-port command (s, d, t, m, k12, p12, r12) and print the reply
+#   ./hil wait <regex> [seconds]        wait until a log line matches (exit 1 on timeout), default 20 s
+#   ./hil pc                            the PC's view: Bluetooth pairing/connection and input devices
+#   ./hil test                          smoke test: split linked, a tapped key reaches the output
+#   ./hil help                          this text
+#
+# The log port is the left half's USB serial port (`usb-log` builds), found by
+# its USB ID. Read access: the udev rule in README.md (or setfacl).
+set -euo pipefail
+
+cd "$(dirname "$0")"
+VID=1209
+PID=0001
+BOOT_VID=239a
+NAME=${KB_NAME:-erik_kbd}
+# Which nice!nano is which half: "<name> <side> <serial>" lines, learned on flashing.
+HALVES=.hil-halves
+# Signed bootloader halves (docs/signed-bootloader.md): serial DFU tools.
+NRFUTIL=${NRFUTIL:-$HOME/.local/share/emk-venv/bin/adafruit-nrfutil}
+KEY=${EMK_KEY:-$HOME/.config/emk/keys/emk-fw.pem}
+BL_ELF=target/bootloader/nice_nano_bootloader-0.11.0-signed.elf
+BL_UF2=target/bootloader/update-nice_nano_bootloader-0.11.0-signed_nosd.uf2
+
+die() { echo "hil: $*" >&2; exit 1; }
+
+# The comment block at the top of this file, without the shebang.
+usage() { awk 'NR > 1 && /^#/ { sub(/^# ?/, ""); print; next } NR > 1 { exit }' "$0"; }
+
+port() {
+    local dev
+    for dev in /dev/ttyACM*; do
+        [[ -e $dev ]] || continue
+        if udevadm info -q property -n "$dev" 2>/dev/null | grep -q "^ID_VENDOR_ID=$VID$"; then
+            echo "$dev"
+            return
+        fi
+    done
+    die "no log port: is the left half on USB (and allowed in USBGuard)? try ./hil allow"
+}
+
+open_port() {
+    local p
+    p=$(port) || exit 1
+    [[ -r $p && -w $p ]] || die "no access to $p (see the udev rule in README.md)"
+    stty -F "$p" raw -echo
+    echo "$p"
+}
+
+# Each reader gets the whole log ring first (up to the keyboard's
+# "log port: reader connected" line), then what happens while it reads.
+# Print only the latter: the reply to a command, not old lines.
+only_new() {
+    awk '/log port: reader connected/ { buf = ""; next }
+         { buf = buf $0 "\n" }
+         END { printf "%s", buf }'
+}
+
+# Read the port for $2 seconds into stdout, after sending $1 (may be empty).
+capture() {
+    local send=$1 secs=$2 p out pid
+    p=$(open_port) || exit 1
+    out=$(mktemp)
+    timeout "$secs" cat "$p" >"$out" &
+    pid=$!
+    sleep 0.3
+    [[ -n $send ]] && printf '%s' "$send" >"$p"
+    wait "$pid" || true
+    cat "$out"
+    rm -f "$out"
+}
+
+allow() {
+    local id
+    for id in $(usbguard list-devices 2>/dev/null | grep -E "^[0-9]+: block id ($VID:$PID|$BOOT_VID:)" | cut -d: -f1); do
+        usbguard allow-device "$id" && echo "allowed device $id"
+    done
+}
+
+# The bootloader's USB serial port (both bootloaders are 239a:00b3), if any.
+boot_tty() {
+    local dev
+    for dev in /dev/ttyACM*; do
+        [[ -e $dev ]] || continue
+        if udevadm info -q property -n "$dev" 2>/dev/null | grep -q "^ID_VENDOR_ID=$BOOT_VID$"; then
+            echo "$dev"
+            return
+        fi
+    done
+    return 1
+}
+
+# Which bootloader that port belongs to: "uf2" (Adafruit UF2, CDC + mass
+# storage, interface class 08) or "signed" (SIGNED_FW build: CDC only).
+boot_kind() {
+    local ifs
+    ifs=$(udevadm info -q property -n "$1" 2>/dev/null | sed -n 's/^ID_USB_INTERFACES=//p')
+    [[ -n $ifs ]] || return 1
+    if [[ $ifs == *:08* ]]; then echo uf2; else echo signed; fi
+}
+
+# Restart a half into its bootloader (log port on the left, else double-tap)
+# and find it on USB. Sets tty, kind (uf2|signed), serial, and from
+# .hil-halves known ("<name> <side>") and was (the bootloader recorded).
+# Dies if this nice!nano is another half, or if a half recorded as signed
+# shows a UF2 drive (a replaced bootloader).
+enter_bootloader() {
+    local side=$1 i p
+    if [[ $side == left ]] && p=$(port 2>/dev/null) && [[ -w $p ]]; then
+        stty -F "$p" raw -echo
+        printf 'boot\n' >"$p" || true
+        echo "asked the left half to restart into its bootloader"
+    else
+        echo "waiting for the bootloader (double-tap reset on the $side half)..."
+    fi
+    # Its serial port shows up with both bootloaders; the UF2 one also has a drive.
+    tty="" kind=""
+    for i in $(seq 1 60); do
+        allow >/dev/null
+        if tty=$(boot_tty) && kind=$(boot_kind "$tty"); then break; fi
+        kind=""
+        sleep 1
+    done
+    [[ -n $kind ]] || die "no bootloader appeared on USB"
+    # Halves are remembered by serial: "<name> <side> <serial> <uf2|signed>".
+    serial=$(udevadm info -q property -n "$tty" 2>/dev/null | sed -n 's/^ID_SERIAL_SHORT=//p')
+    [[ -n $serial ]] || serial=$(usbguard list-devices 2>/dev/null | grep -E "id $BOOT_VID:" | grep -o 'serial "[^"]*"' | head -1 | cut -d'"' -f2)
+    known="" was=""
+    if [[ -n $serial && -f $HALVES ]]; then
+        known=$(awk -v s="$serial" '$3==s{print $1" "$2}' "$HALVES" | head -1)
+        was=$(awk -v s="$serial" '$3==s{print $4}' "$HALVES" | head -1)
+        if [[ -n $known && $known != "$NAME $side" ]]; then
+            die "this nice!nano ($serial) is $known, not $NAME $side: not flashing"
+        fi
+    fi
+    echo "bootloader: $kind (serial $serial, port $tty)"
+    if [[ $was == signed && $kind == uf2 ]]; then
+        die "ALARM: $NAME $side ($serial) had the signed bootloader and now shows a UF2 drive." \
+            "Someone may have replaced its bootloader. Not flashing; see docs/signed-bootloader.md (tamper alarm)."
+    fi
+}
+
+# What a half's bootloader is, without flashing. It then waits in DFU mode:
+# press reset once to leave.
+bootinfo() {
+    local side=${1:-} tty kind serial known was
+    [[ $side == left || $side == right ]] || die "usage: ./hil bootinfo left|right"
+    enter_bootloader "$side"
+    echo "recorded: ${known:-not in $HALVES} ${was:+($was)}"
+    udevadm info -q property -n "$tty" | grep -E '^ID_(VENDOR_ID|MODEL_ID|MODEL|SERIAL_SHORT|USB_INTERFACES)='
+    if [[ $kind == uf2 ]]; then
+        local i dev="" mnt
+        for i in $(seq 1 10); do
+            dev=$(lsblk -rno NAME,LABEL | awk '$2=="NICENANO"{print $1}' | head -1)
+            [[ -n $dev ]] && break
+            sleep 1
+        done
+        if [[ -n $dev ]]; then
+            udisksctl mount -b "/dev/$dev" >/dev/null 2>&1 || true
+            mnt=$(findmnt -rn -o TARGET -S "/dev/$dev")
+            [[ -n $mnt && -f $mnt/INFO_UF2.TXT ]] && cat "$mnt/INFO_UF2.TXT"
+        fi
+    else
+        echo "no drive, CDC only: signed-only bootloader (version: see the 'boot: bootloader' log line)"
+    fi
+    echo "the half waits in its bootloader: press reset once to start the firmware again"
+}
+
+flash() {
+    # One flash at a time: two waiting at once could write to the same drive.
+    exec 9>"${XDG_RUNTIME_DIR:-/tmp}/hil-flash.lock"
+    flock -n 9 || die "another ./hil flash is running"
+    local side=${1:-} file=${2:-} tty kind serial known was i
+    [[ $side == left || $side == right ]] || die "usage: ./hil flash left|right [file.uf2|file.zip]"
+    enter_bootloader "$side"
+    if [[ $kind == signed ]]; then
+        flash_signed "$side" "${file:-target/fw-nrf-$side-ble-$NAME.zip}" "$tty"
+    else
+        flash_uf2 "$side" "${file:-target/fw-nrf-$side-ble-$NAME.uf2}"
+    fi
+    if [[ -n $serial ]]; then
+        if [[ -z $known ]]; then
+            echo "$NAME $side $serial $kind" >>"$HALVES"
+        elif [[ $was != "$kind" ]]; then
+            echo "noting: $NAME $side now has the $kind bootloader (was ${was:-unrecorded})"
+            awk -v s="$serial" -v k="$kind" '$3==s{$4=k} {print}' "$HALVES" >"$HALVES.new" && mv "$HALVES.new" "$HALVES"
+        fi
+    fi
+    if [[ $side == left ]]; then
+        for i in $(seq 1 30); do
+            if lsusb | grep -q "$VID:$PID" || usbguard list-devices 2>/dev/null | grep -q "block id $VID:$PID"; then
+                allow >/dev/null
+                echo "keyboard back after ${i}s"
+                return
+            fi
+            sleep 1
+        done
+        die "the keyboard did not come back on USB"
+    fi
+}
+
+flash_uf2() {
+    local side=$1 file=$2 i dev=""
+    [[ $file == *.uf2 ]] || die "this half has the UF2 bootloader: flash a .uf2, not $file"
+    [[ -f $file ]] || die "$file not found; build it with: BLE=1 SIDE=$side ./fw-nrf/build-uf2 $NAME"
+    for i in $(seq 1 20); do
+        dev=$(lsblk -rno NAME,LABEL | awk '$2=="NICENANO"{print $1}' | head -1)
+        [[ -n $dev ]] && break
+        sleep 1
+    done
+    [[ -n $dev ]] || die "no NICENANO drive appeared"
+    udisksctl mount -b "/dev/$dev" >/dev/null 2>&1 || true
+    local mnt
+    mnt=$(findmnt -rn -o TARGET -S "/dev/$dev")
+    [[ -n $mnt ]] || die "could not mount /dev/$dev"
+    cp "$file" "$mnt/"
+    sync
+    echo "flashed $file"
+}
+
+# Signed bootloader: serial DFU with a package signed by fw-nrf/build-uf2.
+# A package the bootloader refuses still costs the application (it erases
+# before it checks), so check it here first, against the key in the bootloader
+# we built if there is one.
+flash_signed() {
+    local side=$1 file=$2 tty=$3
+    [[ $file == *.zip ]] || die "this half has the signed bootloader: flash a signed .zip, not $file"
+    [[ -f $file ]] || die "$file not found; build it with: BLE=1 SIDE=$side ./fw-nrf/build-uf2 $NAME (needs the signing key)"
+    [[ -x $NRFUTIL ]] || die "no adafruit-nrfutil at $NRFUTIL (docs/signed-bootloader.md)"
+    [[ -r $tty && -w $tty ]] || die "no access to $tty (the bootloader's udev rule in docs/signed-bootloader.md)"
+    local check=(--key-file "$KEY")
+    [[ -f $BL_ELF ]] && check=(--elf "$BL_ELF" --uf2 "$BL_UF2")
+    "$(dirname "$NRFUTIL")/python3" -I fw-nrf/dfu-verify.py package "$file" "${check[@]}" >/dev/null ||
+        die "$file fails fw-nrf/dfu-verify.py (the bootloader would refuse it and erase the app): not flashing"
+    "$NRFUTIL" dfu serial --package "$file" -p "$tty" -b 115200 --singlebank ||
+        die "serial DFU failed; the half stays in its bootloader (double-tap reset and run ./hil flash $side again)"
+    echo "flashed $file"
+}
+
+wait_for() {
+    local regex=$1 secs=${2:-20} p out pid
+    p=$(open_port) || exit 1
+    out=$(mktemp)
+    timeout "$secs" cat "$p" >"$out" &
+    pid=$!
+    local start=$SECONDS
+    while kill -0 "$pid" 2>/dev/null; do
+        if only_new <"$out" | grep -Eq "$regex"; then
+            grep -E "$regex" "$out" | tail -1
+            kill "$pid" 2>/dev/null || true
+            rm -f "$out"
+            return 0
+        fi
+        (( SECONDS - start > secs )) && break
+        sleep 0.2
+    done
+    rm -f "$out"
+    die "no log line matching '$regex' within ${secs}s"
+}
+
+pc() {
+    local addr
+    addr=$(bluetoothctl devices 2>/dev/null | awk -v n="$NAME" '$3==n{print $2}')
+    if [[ -z $addr ]]; then
+        echo "bluetooth: no device named $NAME known to the PC"
+    else
+        local a
+        for a in $addr; do
+            local uuids
+            uuids=$(bluetoothctl info "$a" | grep -c 'Human Interface Device' || true)
+            echo "bluetooth $a ($([[ $uuids -gt 0 ]] && echo keyboard || echo 'not the keyboard: split half?')):"
+            bluetoothctl info "$a" | grep -E '^\s*(Paired|Bonded|Trusted|Connected):' | sed 's/^\s*/  /'
+        done
+    fi
+    echo "input devices:"
+    grep -A1 "^N: Name=\".*$NAME" /proc/bus/input/devices | grep -o 'Name=.*' | sed 's/^/  /' || echo "  none"
+}
+
+smoke() {
+    local fail=0
+    echo "== status"
+    local status
+    status=$(capture s 2 | only_new)
+    echo "$status" | grep status: || true
+    if echo "$status" | grep -q 'split linked'; then echo "ok: halves linked"; else echo "FAIL: halves not linked"; fail=1; fi
+
+    # Muted: the reports are traced but not sent, so nothing gets typed on the PC.
+    echo "== tapping the A position (13), muted, with report tracing"
+    local out
+    out=$(capture $'m\nt\nk13\nt\nm\n' 2 | only_new)
+    echo "$out" | grep -E 'inject|report' || true
+    # A = usage 0x04 in the first key slot.
+    if echo "$out" | grep -Eq 'report (Usb|Ble): \[00, 00, 04'; then echo "ok: A reached the output"; else echo "FAIL: no report with A"; fail=1; fi
+    if echo "$out" | grep -Eq 'report (Usb|Ble): \[00, 00, 00, 00, 00, 00, 00, 00\]'; then echo "ok: released"; else echo "FAIL: no release report"; fail=1; fi
+
+    echo "== PC"
+    pc
+    return $fail
+}
+
+case ${1:-} in
+    flash) shift; flash "$@" ;;
+    bootinfo) shift; bootinfo "$@" ;;
+    allow) allow ;;
+    log) capture "" "${2:-3}" ;;
+    cmd) [[ -n ${2:-} ]] || die "usage: ./hil cmd <command> [seconds]"; c=$2; [[ ${#c} -gt 1 ]] && c+=$'\n'; capture "$c" "${3:-2}" | only_new ;;
+    wait) [[ -n ${2:-} ]] || die "usage: ./hil wait <regex> [seconds]"; wait_for "$2" "${3:-20}" ;;
+    pc) pc ;;
+    test) smoke ;;
+    -h|--help|help) usage ;;
+    *) usage; exit 1 ;;
+esac

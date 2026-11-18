@@ -1,0 +1,42 @@
+# Build outputs (Rust: every target/ dir, including target/docs-media and
+# target/kbnotify-win; the dev container's cargo home; the bootloader source clone)
+**/target/
+/.cargo-home/
+/build/
+
+# .NET
+bin/
+obj/
+TestResults/
+publish/
+*.user
+*.suo
+.vs/
+
+# Node (release tooling: package.json in the root)
+node_modules/
+
+# Python
+__pycache__/
+*.py[cod]
+.ruff_cache/
+.venv/
+
+# Editors and OS (shared VS Code settings may be committed)
+.idea/
+.vscode/*
+!.vscode/settings.json
+!.vscode/extensions.json
+!.vscode/launch.json
+!.vscode/tasks.json
+*.swp
+*~
+.DS_Store
+Thumbs.db
+
+# Local only: never commit
+/backup/
+.hil-halves
+*.pem
+*.key
+.env

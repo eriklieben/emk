@@ -1,0 +1,16 @@
+[package]
+name = "kb-emu"
+description = "The keyboard firmware logic behind a C ABI, for the .NET emulator."
+edition.workspace = true
+version.workspace = true
+license.workspace = true
+
+[lib]
+crate-type = ["cdylib", "rlib"]
+
+[lints]
+workspace = true
+
+[dependencies]
+kb-core = { path = "../core" }
+kb-display = { path = "../display" }

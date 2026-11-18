@@ -1,0 +1,11 @@
+[package]
+name = "kb-core"
+description = "Hardware-independent keyboard engine: layers, hold-taps, combos, caps word, debounce."
+edition.workspace = true
+version.workspace = true
+license.workspace = true
+
+[lints]
+workspace = true
+
+[dependencies]

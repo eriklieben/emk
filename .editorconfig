@@ -1,0 +1,25 @@
+# Editor settings for the whole repo. emulator/ has its own .editorconfig
+# (root = true there) with the C# and .NET rules.
+root = true
+
+[*]
+charset = utf-8
+end_of_line = lf
+insert_final_newline = true
+trim_trailing_whitespace = true
+indent_style = space
+indent_size = 4
+
+[*.md]
+# Two trailing spaces are a line break in Markdown.
+trim_trailing_whitespace = false
+
+[*.{json,jsonc,yml,yaml}]
+indent_size = 2
+
+# Shell scripts without an extension; hil uses the default 4.
+[{dev,emulate,docs-media,size-report,fw-nrf/build-uf2,fw-nrf/build-bootloader}]
+indent_size = 2
+
+[Makefile]
+indent_style = tab

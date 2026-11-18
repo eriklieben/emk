@@ -1,0 +1,17 @@
+{
+  // Uses the image that ./dev creates (run ./dev once first).
+  // For VS Code with podman, set "dev.containers.dockerPath": "podman".
+  "name": "keyboard (Rust)",
+  "image": "localhost/kb-dev:latest",
+  "runArgs": ["--userns=keep-id"],
+  "containerUser": "${localEnv:USER}",
+  "updateRemoteUserUID": false,
+  "containerEnv": {
+    "CARGO_HOME": "${containerWorkspaceFolder}/.cargo-home"
+  },
+  "customizations": {
+    "vscode": {
+      "extensions": ["rust-lang.rust-analyzer", "tamasfe.even-better-toml"]
+    }
+  }
+}

@@ -1,0 +1,9 @@
+// markdownlint-cli2 settings for README.md and docs/ (the lint job in ci.yml).
+{
+  // Prose is wrapped at about 100 columns; tables and URLs are longer.
+  "MD013": false,
+  // README uses <details>/<summary> for the printable keymap SVGs.
+  "MD033": { "allowed_elements": ["details", "summary"] },
+  // README's layer captions are bold labels, not headings.
+  "MD036": false
+}

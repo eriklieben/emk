@@ -1,0 +1,13 @@
+[package]
+name = "kb-display"
+description = "OLED status screens and an SSD1306 driver that produces the I2C byte stream."
+edition.workspace = true
+version.workspace = true
+license.workspace = true
+
+[lints]
+workspace = true
+
+[dependencies]
+embedded-graphics = "0.8.2"
+kb-core = { path = "../core" }

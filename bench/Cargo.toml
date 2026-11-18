@@ -1,0 +1,35 @@
+# Host-side timing of the keymap engine and the display code.
+# Standalone (like fw-nrf), so the main workspace stays untouched:
+#   ./dev sh -c 'cd bench && cargo run --release'
+[package]
+name = "kb-bench"
+edition = "2024"
+version = "0.1.0"
+license = "MIT"
+publish = false
+
+[workspace]
+
+# The same lint levels as the main workspace (../Cargo.toml, [workspace.lints]).
+[lints.rust]
+unsafe_op_in_unsafe_fn = "deny"
+
+[lints.clippy]
+pedantic = { level = "warn", priority = -1 }
+redundant_clone = "warn"
+needless_collect = "warn"
+use_self = "warn"
+undocumented_unsafe_blocks = "warn"
+# Allowed on purpose; the reasons are in ../Cargo.toml.
+cast_possible_truncation = "allow"
+cast_possible_wrap = "allow"
+cast_sign_loss = "allow"
+cast_precision_loss = "allow"
+similar_names = "allow"
+
+[dependencies]
+kb-core = { path = "../core" }
+kb-display = { path = "../display" }
+
+[profile.release]
+debug = 1

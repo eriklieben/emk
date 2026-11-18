@@ -1,0 +1,41 @@
+#!/usr/bin/env bash
+# Run a command inside the Rust dev container (podman, no VS Code needed).
+#
+#   ./dev cargo test
+#   ./dev cargo run -p kb-sim -- --list
+#   ./dev               # interactive shell
+#   ./dev --rebuild     # recreate the image
+#
+# The image is created with `podman run` + `podman commit` instead of
+# `podman build`, because rootless buildah fails on this host when it
+# overlay-mounts the build context.
+set -euo pipefail
+cd "$(dirname "$0")"
+
+BASE=docker.io/library/rust:1.99-trixie
+IMAGE=localhost/kb-dev:latest
+SETUP='apt-get update -qq && apt-get install -y -qq --no-install-recommends libclang-dev >/dev/null && rm -rf /var/lib/apt/lists/* && rustup component add rustfmt clippy llvm-tools && rustup target add thumbv7em-none-eabihf'
+
+if [[ "${1:-}" == "--rebuild" ]]; then
+  podman rmi -f "$IMAGE" >/dev/null 2>&1 || true
+  shift
+fi
+
+if ! podman image exists "$IMAGE"; then
+  echo "creating $IMAGE from $BASE ..." >&2
+  podman rm -f kb-dev-setup >/dev/null 2>&1 || true
+  podman run --name kb-dev-setup "$BASE" sh -c "$SETUP"
+  podman commit -q kb-dev-setup "$IMAGE" >/dev/null
+  podman rm kb-dev-setup >/dev/null
+fi
+[[ $# -eq 0 ]] && set -- bash
+
+args=(--rm --userns=keep-id -v "$PWD:/work" -w /work -e CARGO_HOME=/work/.cargo-home)
+[[ -t 0 && -t 1 ]] && args+=(-it)
+
+# kb-sim needs the host keyboard and uinput. Only passed through when your
+# user can already access them (see README: "Permissions").
+if [[ -r /dev/uinput && -w /dev/uinput ]]; then args+=(--device /dev/uinput); fi
+if [[ -r /dev/input/event0 ]]; then args+=(--device /dev/input --group-add keep-groups); fi
+
+exec podman run "${args[@]}" "$IMAGE" "$@"

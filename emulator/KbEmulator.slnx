@@ -1,0 +1,29 @@
+<Solution>
+  <Folder Name="/App.Tests/">
+    <Project Path="App.Tests/KbEmulator.Tests.csproj" />
+  </Folder>
+  <Folder Name="/App/">
+    <Project Path="App/KbEmulator.csproj" />
+  </Folder>
+  <Folder Name="/DocsMedia/">
+    <Project Path="DocsMedia/DocsMedia.csproj" />
+  </Folder>
+  <Folder Name="/HostProtocol.Tests/">
+    <Project Path="HostProtocol.Tests/Kb.HostProtocol.Tests.csproj" />
+  </Folder>
+  <Folder Name="/HostProtocol/">
+    <Project Path="HostProtocol/Kb.HostProtocol.csproj" />
+  </Folder>
+  <Folder Name="/KbNotify.Tests/">
+    <Project Path="KbNotify.Tests/KbNotify.Tests.csproj" />
+  </Folder>
+  <Folder Name="/KbNotify/">
+    <Project Path="KbNotify/kbnotify.csproj" />
+  </Folder>
+  <Folder Name="/Ssd1306.Tests/">
+    <Project Path="Ssd1306.Tests/Kb.Ssd1306.Tests.csproj" />
+  </Folder>
+  <Folder Name="/Ssd1306/">
+    <Project Path="Ssd1306/Kb.Ssd1306.csproj" />
+  </Folder>
+</Solution>

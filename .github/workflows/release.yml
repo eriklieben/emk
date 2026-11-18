@@ -1,0 +1,235 @@
+name: Release
+run-name: Release${{ inputs.dry_run && ' (dry run)' || '' }}
+
+# On main: run the checks (ci.yml), build the release files, and let semantic-release (release.config.mjs) decide
+# from the commit messages since the last tag (Angular format, see docs/development.md, "Commit messages") whether
+# this is a new version: feat -> minor, fix / perf / revert -> patch, a breaking change -> major; chore, docs,
+# refactor, test, build, style and ci commits don't release. With the emk-release GitHub App it also commits
+# CHANGELOG.md through the GitHub API (signed, "Verified"; eng/release-commit.mjs), tags v<version> and creates the
+# GitHub release with the firmware, kbnotify and SHA256SUMS. Overview and setup: docs/releasing.md.
+#
+# Started by a push to main (the release commit has [skip ci], so it doesn't start another run), or by hand
+# (Actions > Release > Run workflow): a dry run by default, which builds everything and prints the next version and its
+# notes, but tags and publishes nothing.
+#
+# Actions are pinned to a commit SHA (the version in the comment).
+
+on:
+  push:
+    branches: [main]
+  workflow_dispatch:
+    inputs:
+      dry_run:
+        description: Dry run (show the next version and its release notes, publish nothing)
+        type: boolean
+        default: true
+
+permissions:
+  contents: read
+
+# One release at a time; a queued run never cancels a running one.
+concurrency:
+  group: release-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  ci:
+    uses: ./.github/workflows/ci.yml
+    # SONAR_TOKEN for the analysis of main (repository secrets only: the release environment isn't used here).
+    secrets: inherit
+
+  firmware:
+    name: Firmware
+    needs: ci
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    container: docker.io/library/rust:1.99-trixie
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - name: Toolchain extras
+        run: |
+          apt-get update -qq
+          apt-get install -y -qq --no-install-recommends libclang-dev python3
+          rustup component add llvm-tools
+          rustup target add thumbv7em-none-eabihf
+      - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2.9.3
+        with:
+          workspaces: fw-nrf
+      # Unsigned: the signing key never leaves the maintainer's machine.
+      - name: Build both halves (Bluetooth split)
+        env:
+          EMK_NO_CONTAINER: "1"
+        run: |
+          BLE=1 ./fw-nrf/build-uf2 erik_kbd
+          BLE=1 SIDE=right ./fw-nrf/build-uf2 erik_kbd
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: firmware
+          path: target/fw-nrf-*-ble-erik_kbd.uf2
+          if-no-files-found: error
+
+  kbnotify:
+    name: kbnotify
+    needs: ci
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: actions/setup-dotnet@0f4a354dd5547a28c70b7853dbd95d5b67886e73 # v6.1.0
+        with:
+          dotnet-version: 10.0.x
+      - name: Publish for Linux and Windows
+        run: |
+          for rid in linux-x64 win-x64; do
+            dotnet publish emulator/KbNotify -c Release -r "$rid" --self-contained \
+              -p:PublishSingleFile=true -o "publish/$rid"
+          done
+          mkdir -p dist
+          cp publish/linux-x64/kbnotify dist/kbnotify-linux-x64
+          cp publish/win-x64/kbnotify.exe dist/kbnotify-win-x64.exe
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: kbnotify
+          path: dist/
+          if-no-files-found: error
+
+  release:
+    name: semantic-release${{ inputs.dry_run && ' (dry run)' || '' }}
+    needs: [firmware, kbnotify]
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+    # Restricted to main (Settings > Environments, deployment branch policy); it holds RELEASE_APP_PRIVATE_KEY.
+    environment: release
+    permissions:
+      contents: write        # the GitHub release and its assets (GITHUB_TOKEN); the commit and tag use the App token
+      issues: write          # comments on released issues, the "release is failing" issue
+      pull-requests: write   # comments on released pull requests
+      id-token: write        # build provenance attestation (Sigstore)
+      attestations: write    # build provenance attestation of the release files
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          # The whole history and all tags: semantic-release reads the commits since the last v* tag.
+          fetch-depth: 0
+          # semantic-release pushes the tag with its own credentials (below).
+          persist-credentials: false
+
+      - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
+        with:
+          node-version: lts/*
+
+      - uses: pnpm/action-setup@73e46992e05b19abd31f2f3c20e0e7370d762115 # v6.1.1
+
+      - name: Install semantic-release
+        # --ignore-scripts: no install scripts (and no local git hooks) in a job with a write token.
+        run: pnpm install --frozen-lockfile --ignore-scripts
+
+      # By name: ci.yml's jobs upload artifacts of their own (coverage, kb-emu) to the same run.
+      - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+        with:
+          name: firmware
+          path: dist
+      - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+        with:
+          name: kbnotify
+          path: dist
+
+      - name: Release files and SHA256SUMS
+        # Every asset release.config.mjs lists must be here: @semantic-release/github skips a missing file silently.
+        run: |
+          cd dist
+          for f in fw-nrf-left-ble-erik_kbd.uf2 fw-nrf-right-ble-erik_kbd.uf2 kbnotify-linux-x64 kbnotify-win-x64.exe; do
+            [ -s "$f" ] || { echo "::error::dist/$f is missing"; exit 1; }
+          done
+          sha256sum fw-nrf-*.uf2 kbnotify-* > SHA256SUMS
+          cat SHA256SUMS
+          { echo '```text'; cat SHA256SUMS; echo '```'; } >> "$GITHUB_STEP_SUMMARY"
+
+      - name: GitHub App key present
+        # RELEASE_APP_ID set without the key would otherwise fall through to a less clear error: stop with a clear
+        # message instead.
+        if: vars.RELEASE_APP_ID != ''
+        env:
+          HAS_KEY: ${{ secrets.RELEASE_APP_PRIVATE_KEY != '' }}
+        run: |
+          if [ "$HAS_KEY" != "true" ]; then
+            echo "::error::Variable RELEASE_APP_ID is set but the secret RELEASE_APP_PRIVATE_KEY is missing from the release environment. Add it, or delete the variable to release without the CHANGELOG.md commit."
+            exit 1
+          fi
+
+      - name: GitHub App token
+        # With repository variable RELEASE_APP_ID and environment secret RELEASE_APP_PRIVATE_KEY of the emk-release
+        # GitHub App, CHANGELOG.md is committed through the GitHub API with this token (eng/release-commit.mjs): GitHub
+        # signs it ("Verified", author emk-release[bot]), which main's ruleset requires. The token is limited to this
+        # repository and Contents: write (the commit, the tag and its git note).
+        # Without the variable there is no release commit at all (never an unverified push to main): the tag goes on
+        # the released commit, the notes only on the GitHub release.
+        # client-id (v3; app-id is deprecated) accepts the numeric App ID as well as the Client ID.
+        id: app-token
+        if: vars.RELEASE_APP_ID != ''
+        uses: actions/create-github-app-token@64ab729a6294000f5aa4a4bc0b73d1f32bc45510 # v3.3.0
+        with:
+          client-id: ${{ vars.RELEASE_APP_ID }}
+          private-key: ${{ secrets.RELEASE_APP_PRIVATE_KEY }}
+          permission-contents: write
+
+      - name: semantic-release
+        env:
+          # The GitHub release, its assets, the comments on released issues and PRs and the "release is failing" issue:
+          # always the job's GITHUB_TOKEN (permissions above), so the App needs no Issues / Pull requests permission.
+          GITHUB_TOKEN: ${{ github.token }}
+          RELEASE_APP_TOKEN: ${{ steps.app-token.outputs.token }}
+          DRY_RUN: ${{ inputs.dry_run }}
+        run: |
+          if [ -n "$RELEASE_APP_TOKEN" ]; then
+            # The CHANGELOG.md commit through the GitHub API as the App (release.config.mjs), and semantic-release's
+            # own git pushes (the tag v<version> and its git note) with the App token too: GIT_CREDENTIALS comes before
+            # GITHUB_TOKEN in semantic-release's lookup, so a tag ruleset that only the App may bypass covers them.
+            export EMK_RELEASE_COMMIT=api
+            export GIT_CREDENTIALS="x-access-token:$RELEASE_APP_TOKEN"
+          else
+            unset RELEASE_APP_TOKEN
+          fi
+          if [ "$DRY_RUN" = "true" ]; then
+            npx --no -- semantic-release --dry-run
+          else
+            npx --no -- semantic-release
+          fi
+
+      - name: Release tag
+        id: tag
+        if: ${{ !cancelled() && !inputs.dry_run }}
+        run: |
+          tag=$(git tag --points-at HEAD --list 'v*' | head -n 1)
+          echo "tag=$tag" >> "$GITHUB_OUTPUT"
+
+      - name: Attest build provenance
+        # Signed SLSA build provenance for the release files, stored in the repository's attestations:
+        # `gh attestation verify <file> --repo eriklieben/emk`. Bound to the file digests, so it doesn't matter that it
+        # runs after the upload. Artifact attestations need a public repository (or GitHub Enterprise Cloud): skipped
+        # while the repository is private.
+        if: ${{ !cancelled() && steps.tag.outputs.tag != '' && !github.event.repository.private }}
+        uses: actions/attest-build-provenance@4d101475d8b20a2381f78447822ac1eab6504dd8 # v4.2.2
+        with:
+          subject-path: |
+            dist/fw-nrf-*.uf2
+            dist/kbnotify-*
+            dist/SHA256SUMS
+
+      - name: Summary
+        if: ${{ !cancelled() }}
+        env:
+          TAG: ${{ steps.tag.outputs.tag }}
+          DRY_RUN: ${{ inputs.dry_run }}
+        run: |
+          if [ "$DRY_RUN" = "true" ]; then
+            echo "Dry run: the semantic-release log shows the next version and its release notes." >> "$GITHUB_STEP_SUMMARY"
+          elif [ -n "$TAG" ]; then
+            echo "Released **$TAG**: https://github.com/${{ github.repository }}/releases/tag/$TAG" >> "$GITHUB_STEP_SUMMARY"
+          else
+            echo "Nothing released: no feat, fix, perf, revert or breaking-change commit since the last tag (or see the log)." >> "$GITHUB_STEP_SUMMARY"
+          fi

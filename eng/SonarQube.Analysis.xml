@@ -1,0 +1,20 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!-- The SonarQube Cloud analysis settings, for CI's sonar job: SonarScanner for .NET reads them with /s: (it doesn't
+     read sonar-project.properties). docs/development.md, "Code analysis", explains the choices. -->
+<SonarQubeAnalysisProperties xmlns="http://www.sonarsource.com/msbuild/integration/2015/1">
+  <!-- Not analysed: build output, rendered media, local ZMK builds, generated code. -->
+  <Property Name="sonar.exclusions">**/target/**,**/bin/**,**/obj/**,**/TestResults/**,build/**,backup/**,docs/media/**,.cargo-home/**,**/*.g.cs</Property>
+  <!-- Rust tests (integration tests and the test aids) are test code: test rules, not counted as lines of code. The
+       .NET test projects are marked in emulator/Directory.Build.props. -->
+  <Property Name="sonar.test.inclusions">**/tests/**,ble/src/test_flash.rs</Property>
+  <!-- Left out of the coverage figures, as in ./coverage: tools and test aids (the Linux simulator, the in-memory
+       Bluetooth controller, the media renderers, the benchmark and size probe), the firmware (it only runs on the
+       chip), the Windows-only HID interop (CI runs on Linux), and the scripts. -->
+  <Property Name="sonar.coverage.exclusions">sim/**,blesim/**,tools/**,bench/**,size-probe/**,fw-nrf/**,emulator/DocsMedia/**,emulator/HostProtocol/NativeWindowsHid.cs,**/*.py</Property>
+  <!-- Coverage from the CI jobs (downloaded artifacts): Cobertura from ./coverage dotnet, lcov from ./coverage rust. -->
+  <Property Name="sonar.cs.cobertura.reportsPaths">target/coverage/dotnet/*.cobertura.xml</Property>
+  <Property Name="sonar.rust.lcov.reportPaths">target/coverage/rust.lcov</Property>
+  <!-- Compiler and analyzer warnings are not imported: the Release build gates them (warnings as errors), and they
+       would show up twice (as external issues next to Sonar's own rules). -->
+  <Property Name="sonar.cs.roslyn.ignoreIssues">true</Property>
+</SonarQubeAnalysisProperties>

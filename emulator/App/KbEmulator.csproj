@@ -1,0 +1,35 @@
+﻿<Project Sdk="Microsoft.NET.Sdk">
+
+  <PropertyGroup>
+    <OutputType>WinExe</OutputType>
+    <AllowUnsafeBlocks>true</AllowUnsafeBlocks>
+    <RootNamespace>KbEmulator</RootNamespace>
+  </PropertyGroup>
+
+  <ItemGroup>
+    <ProjectReference Include="..\Ssd1306\Kb.Ssd1306.csproj" />
+    <ProjectReference Include="..\HostProtocol\Kb.HostProtocol.csproj" />
+  </ItemGroup>
+
+  <ItemGroup>
+    <PackageReference Include="Avalonia" Version="12.1.6" />
+    <PackageReference Include="Avalonia.Desktop" Version="12.1.6" />
+    <PackageReference Include="Avalonia.Themes.Fluent" Version="12.1.6" />
+  </ItemGroup>
+
+  <ItemGroup>
+    <AvaloniaResource Include="Assets\Fonts\*.ttf" />
+    <None Include="Assets\Fonts\OFL-*.txt" CopyToOutputDirectory="PreserveNewest" />
+  </ItemGroup>
+
+  <!-- Firmware logic from the Rust workspace (crate emu), built by ./emulate at the repo root -->
+  <ItemGroup>
+    <None Include="..\..\target\release\libkb_emu.so" Link="libkb_emu.so" CopyToOutputDirectory="PreserveNewest" />
+  </ItemGroup>
+
+  <ItemGroup>
+    <InternalsVisibleTo Include="KbEmulator.Tests" />
+    <InternalsVisibleTo Include="EmkDocsMedia" />
+  </ItemGroup>
+
+</Project>

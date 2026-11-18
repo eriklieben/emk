@@ -1,0 +1,35 @@
+[workspace]
+resolver = "3"
+members = ["ble", "blesim", "core", "display", "emu", "sim", "tools/docs-media"]
+
+[workspace.package]
+edition = "2024"
+version = "0.1.0"
+license = "MIT"
+
+# Lint levels for every crate in this workspace (each member has
+# `[lints] workspace = true`). fw-nrf, bench and size-probe are separate
+# workspaces and carry the same table. Checked with
+#   ./dev cargo clippy --workspace --all-targets -- -D warnings
+[workspace.lints.rust]
+unsafe_op_in_unsafe_fn = "deny"
+
+[workspace.lints.clippy]
+pedantic = { level = "warn", priority = -1 }
+# Nursery lints that only fire on real waste.
+redundant_clone = "warn"
+needless_collect = "warn"
+use_self = "warn"
+# Every `unsafe` block says why it is sound (`// SAFETY: ...`).
+undocumented_unsafe_blocks = "warn"
+# Pedantic lints that are noise for this code, allowed on purpose:
+# - Integer casts: indices into fixed tables of at most 255 entries, pixel
+#   coordinates on a 128×32 screen, wire-format bytes and millisecond clocks
+#   that wrap by design (`now.wrapping_sub(t) as i32`). The ranges are
+#   checked where the values are produced, not at every `as`.
+cast_possible_truncation = "allow"
+cast_possible_wrap = "allow"
+cast_sign_loss = "allow"
+cast_precision_loss = "allow"
+# - Pairs like `left`/`right`, `x0`/`x1`, `rx`/`tx` are the clearest names.
+similar_names = "allow"

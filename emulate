@@ -1,0 +1,7 @@
+#!/usr/bin/env bash
+# Build the firmware logic (Rust, in the dev container) and start the .NET emulator on the host.
+set -euo pipefail
+cd "$(dirname "$0")"
+./dev cargo build --release -p kb-emu
+./size-report
+exec dotnet run --project emulator/App -- "$@"

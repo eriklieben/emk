@@ -1,0 +1,28 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!-- Code coverage settings of the test runs (Microsoft.Testing.Extensions.CodeCoverage, passed with
+     coverage-settings and an absolute path: ../coverage and CI do). What counts is the code that ships: the app, its
+     libraries and kbnotify. Left out: the test projects, DocsMedia (a tool that renders the README's
+     pictures), the Windows-only HID interop (P/Invoke into SetupAPI and hid.dll, which can't run on
+     the Linux CI) and generated source (the Regex source generator). docs/development.md,
+     "Tests and tools". -->
+<Configuration>
+  <CodeCoverage>
+    <ModulePaths>
+      <Exclude>
+        <ModulePath>.*\.Tests\.dll$</ModulePath>
+        <ModulePath>.*EmkDocsMedia\.dll$</ModulePath>
+        <ModulePath>.*DocsMedia\.dll$</ModulePath>
+      </Exclude>
+    </ModulePaths>
+    <Functions>
+      <Exclude>
+        <Function>^Kb\.HostProtocol\.NativeWindowsHid.*</Function>
+      </Exclude>
+    </Functions>
+    <Sources>
+      <Exclude>
+        <Source>.*\.g\.cs$</Source>
+      </Exclude>
+    </Sources>
+  </CodeCoverage>
+</Configuration>

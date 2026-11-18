@@ -1,0 +1,22 @@
+[package]
+name = "kb-docs-media"
+description = "Renders the README's pictures (OLED GIFs, keymap SVGs) from the firmware's own screen and keymap code, and assembles the app's frames into GIFs."
+edition.workspace = true
+version.workspace = true
+license.workspace = true
+publish = false
+
+[[bin]]
+name = "docs-media"
+path = "src/main.rs"
+
+[lints]
+workspace = true
+
+[dependencies]
+kb-core = { path = "../../core" }
+kb-display = { path = "../../display" }
+kb-emu = { path = "../../emu" }
+embedded-graphics = "0.8.2"
+gif = "0.13"
+png = "0.17"
