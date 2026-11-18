@@ -87,15 +87,20 @@ A profile is a slot for one paired computer, and USB is one more. `Profile ◀` 
 
 ### Pairing with a code
 
-The keyboard tells the computer it is a keyboard without a screen, so a computer with a screen
-(Windows, Linux/BlueZ, macOS) shows a 6-digit code and the left OLED asks for it. Type the code with
-the digits on the symbols layer, Backspace takes one back, Enter sends it, Escape cancels.
+When you pair a computer (Windows, Linux/BlueZ, macOS), it shows a 6-digit code and the left
+screen asks you to type it. Hold symbols for the digits, Backspace to correct one, Enter to send
+the code and Escape to cancel.
+
+The keyboard has screens, but it tells the computer it can only type. That way the computer has to
+show the code and you type it, which is the safest way to pair: the code goes through you, so
+nobody listening in can slip in between.
 
 ![Pairing: the left screen asks for the code; holding symbols, 4 1 8, a 7 taken back with Backspace, 3 0 6, Enter, then profile 2 shows ✓](docs/media/kb-pairing.gif)
 
 - Nothing typed while the prompt is up reaches any computer.
 - A wrong code fails the pairing; after 60 s without Enter it is rejected.
-- A computer that offers numeric comparison gets the code shown with `ENTER = YES` / `ESC = NO`.
+- Should a computer ask to compare codes instead, the screen shows its code with
+  `ENTER = YES` / `ESC = NO`.
 - A computer with no screen or keyboard pairs without a code (no protection against a man in the
   middle); the log says which way it paired.
 - The link between the halves always pairs by itself.
