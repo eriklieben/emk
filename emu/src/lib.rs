@@ -7,9 +7,9 @@
 //! The caller owns time (milliseconds since start) and must call
 //! [`kb_emu_tick`] regularly, ideally at [`kb_emu_next_deadline`].
 
-// The kb_emu_* functions are the C boundary: pointers come from the .NET
-// side, are null-checked, and must otherwise be valid as documented.
-#![allow(clippy::not_unsafe_ptr_arg_deref)]
+// The kb_emu_* functions are the C boundary: the ones that take pointers
+// are `unsafe` (the .NET side keeps to their `# Safety` contracts); null
+// pointers are checked and answered with the documented defaults.
 
 pub mod bt;
 pub mod mirror;
@@ -1046,16 +1046,27 @@ impl KbEvent {
     }
 }
 
-fn emu<'a>(e: *mut Emu) -> Option<&'a mut Emu> {
-    // SAFETY: the caller passes a pointer from kb_emu_new, not yet freed.
+/// The emulator behind `e`, or `None` for null.
+///
+/// # Safety
+///
+/// `e` is null or an emulator from `kb_emu_new` that is not freed yet, and
+/// not otherwise borrowed while the reference lives.
+unsafe fn emu<'a>(e: *mut Emu) -> Option<&'a mut Emu> {
+    // SAFETY: null or live and unaliased, as this function requires.
     unsafe { e.as_mut() }
 }
 
 /// Copy `s` into `buf` (not NUL-terminated); returns the full length in bytes.
-fn copy_out(s: &[u8], buf: *mut u8, cap: usize) -> usize {
+///
+/// # Safety
+///
+/// `buf` is null or valid for writing `cap` bytes.
+unsafe fn copy_out(s: &[u8], buf: *mut u8, cap: usize) -> usize {
     if !buf.is_null() {
         let n = s.len().min(cap);
-        // SAFETY: the caller guarantees `buf` has room for `cap` bytes.
+        // SAFETY: `buf` has room for `cap` >= `n` bytes, as this function
+        // requires, and can't overlap the borrowed `s`.
         unsafe { std::ptr::copy_nonoverlapping(s.as_ptr(), buf, n) };
     }
     s.len()
@@ -1066,8 +1077,12 @@ pub extern "C" fn kb_emu_new() -> *mut Emu {
     Box::into_raw(Box::new(Emu::new()))
 }
 
+/// # Safety
+///
+/// `e` is null or an emulator from [`kb_emu_new`] that is not freed yet; it is
+/// invalid afterwards.
 #[unsafe(no_mangle)]
-pub extern "C" fn kb_emu_free(e: *mut Emu) {
+pub unsafe extern "C" fn kb_emu_free(e: *mut Emu) {
     if !e.is_null() {
         // SAFETY: pointer came from Box::into_raw in kb_emu_new.
         drop(unsafe { Box::from_raw(e) });
@@ -1079,37 +1094,66 @@ pub extern "C" fn kb_emu_key_count() -> u32 {
     KEYS as u32
 }
 
+/// # Safety
+///
+/// `e` is null or an emulator from [`kb_emu_new`] that is not freed yet.
+/// Nothing is kept past the call.
 #[unsafe(no_mangle)]
-pub extern "C" fn kb_emu_press(e: *mut Emu, pos: u8, now_ms: u32) {
-    if let Some(e) = emu(e) {
+pub unsafe extern "C" fn kb_emu_press(e: *mut Emu, pos: u8, now_ms: u32) {
+    // SAFETY: `e` is null or live, as this function requires.
+    if let Some(e) = unsafe { emu(e) } {
         e.press(pos, now_ms);
     }
 }
 
+/// # Safety
+///
+/// `e` is null or an emulator from [`kb_emu_new`] that is not freed yet.
+/// Nothing is kept past the call.
 #[unsafe(no_mangle)]
-pub extern "C" fn kb_emu_release(e: *mut Emu, pos: u8, now_ms: u32) {
-    if let Some(e) = emu(e) {
+pub unsafe extern "C" fn kb_emu_release(e: *mut Emu, pos: u8, now_ms: u32) {
+    // SAFETY: `e` is null or live, as this function requires.
+    if let Some(e) = unsafe { emu(e) } {
         e.release(pos, now_ms);
     }
 }
 
+/// # Safety
+///
+/// `e` is null or an emulator from [`kb_emu_new`] that is not freed yet.
+/// Nothing is kept past the call.
 #[unsafe(no_mangle)]
-pub extern "C" fn kb_emu_tick(e: *mut Emu, now_ms: u32) {
-    if let Some(e) = emu(e) {
+pub unsafe extern "C" fn kb_emu_tick(e: *mut Emu, now_ms: u32) {
+    // SAFETY: `e` is null or live, as this function requires.
+    if let Some(e) = unsafe { emu(e) } {
         e.tick(now_ms);
     }
 }
 
 /// Next time `kb_emu_tick` must be called, or -1 when nothing is waiting.
+///
+/// # Safety
+///
+/// `e` is null or an emulator from [`kb_emu_new`] that is not freed yet.
+/// Nothing is kept past the call.
 #[unsafe(no_mangle)]
-pub extern "C" fn kb_emu_next_deadline(e: *mut Emu) -> i64 {
-    emu(e).and_then(|e| e.next_deadline()).map_or(-1, i64::from)
+pub unsafe extern "C" fn kb_emu_next_deadline(e: *mut Emu) -> i64 {
+    // SAFETY: `e` is null or live, as this function requires.
+    unsafe { emu(e) }
+        .and_then(|e| e.next_deadline())
+        .map_or(-1, i64::from)
 }
 
 /// Fill `out` with the next output. Returns false when there is none.
+///
+/// # Safety
+///
+/// `e` is null or an emulator from [`kb_emu_new`] that is not freed yet; `out`
+/// is null or valid for writing one [`KbEvent`]. Nothing is kept past the call.
 #[unsafe(no_mangle)]
-pub extern "C" fn kb_emu_poll(e: *mut Emu, now_ms: u32, out: *mut KbEvent) -> bool {
-    let (Some(e), false) = (emu(e), out.is_null()) else {
+pub unsafe extern "C" fn kb_emu_poll(e: *mut Emu, now_ms: u32, out: *mut KbEvent) -> bool {
+    // SAFETY: `e` is null or live, as this function requires.
+    let (Some(e), false) = (unsafe { emu(e) }, out.is_null()) else {
         return false;
     };
     let Some(event) = e.poll(now_ms) else {
@@ -1130,109 +1174,210 @@ fn power_code(state: PowerState) -> u8 {
 
 /// A computer starts pairing with `code` (6 digits, shown by the computer):
 /// the left screen asks for it. Returns the code (`code % 1000000`).
+///
+/// # Safety
+///
+/// `e` is null or an emulator from [`kb_emu_new`] that is not freed yet.
+/// Nothing is kept past the call.
 #[unsafe(no_mangle)]
-pub extern "C" fn kb_emu_simulate_pairing(e: *mut Emu, code: u32, now_ms: u32) -> u32 {
-    emu(e).map_or(0, |e| e.simulate_pairing(code, now_ms))
+pub unsafe extern "C" fn kb_emu_simulate_pairing(e: *mut Emu, code: u32, now_ms: u32) -> u32 {
+    // SAFETY: `e` is null or live, as this function requires.
+    unsafe { emu(e) }.map_or(0, |e| e.simulate_pairing(code, now_ms))
 }
 
 /// Whether a pairing prompt is up.
+///
+/// # Safety
+///
+/// `e` is null or an emulator from [`kb_emu_new`] that is not freed yet.
+/// Nothing is kept past the call.
 #[unsafe(no_mangle)]
-pub extern "C" fn kb_emu_pairing(e: *mut Emu) -> bool {
-    emu(e).is_some_and(|e| e.pairing.is_some())
+pub unsafe extern "C" fn kb_emu_pairing(e: *mut Emu) -> bool {
+    // SAFETY: `e` is null or live, as this function requires.
+    unsafe { emu(e) }.is_some_and(|e| e.pairing.is_some())
 }
 
 /// The radio's transmit power in dBm (`RadioPower` key).
+///
+/// # Safety
+///
+/// `e` is null or an emulator from [`kb_emu_new`] that is not freed yet.
+/// Nothing is kept past the call.
 #[unsafe(no_mangle)]
-pub extern "C" fn kb_emu_radio_dbm(e: *mut Emu) -> i8 {
-    emu(e).map_or(0, |e| e.status.radio_dbm)
+pub unsafe extern "C" fn kb_emu_radio_dbm(e: *mut Emu) -> i8 {
+    // SAFETY: `e` is null or live, as this function requires.
+    unsafe { emu(e) }.map_or(0, |e| e.status.radio_dbm)
 }
 
 /// 0 = active, 1 = idle (OLEDs off), 2 = deep sleep.
+///
+/// # Safety
+///
+/// `e` is null or an emulator from [`kb_emu_new`] that is not freed yet.
+/// Nothing is kept past the call.
 #[unsafe(no_mangle)]
-pub extern "C" fn kb_emu_power_state(e: *mut Emu) -> u8 {
-    emu(e).map_or(0, |e| power_code(e.power_state()))
+pub unsafe extern "C" fn kb_emu_power_state(e: *mut Emu) -> u8 {
+    // SAFETY: `e` is null or live, as this function requires.
+    unsafe { emu(e) }.map_or(0, |e| power_code(e.power_state()))
 }
 
 /// Idle and deep-sleep timeouts in ms; `sleep_ms` 0 disables deep sleep.
+///
+/// # Safety
+///
+/// `e` is null or an emulator from [`kb_emu_new`] that is not freed yet.
+/// Nothing is kept past the call.
 #[unsafe(no_mangle)]
-pub extern "C" fn kb_emu_set_power_timeouts(e: *mut Emu, idle_ms: u32, sleep_ms: u32, now_ms: u32) {
-    if let Some(e) = emu(e) {
+pub unsafe extern "C" fn kb_emu_set_power_timeouts(
+    e: *mut Emu,
+    idle_ms: u32,
+    sleep_ms: u32,
+    now_ms: u32,
+) {
+    // SAFETY: `e` is null or live, as this function requires.
+    if let Some(e) = unsafe { emu(e) } {
         let sleep_ms = (sleep_ms != 0).then_some(sleep_ms);
         e.set_power_config(PowerConfig { idle_ms, sleep_ms }, now_ms);
     }
 }
 
 /// UTF-8 legend of `pos` on the current layers. Returns the full length.
+///
+/// # Safety
+///
+/// `e` is null or an emulator from [`kb_emu_new`] that is not freed yet; `buf`
+/// is null or valid for writing `cap` bytes. Nothing is kept past the call.
 #[unsafe(no_mangle)]
-pub extern "C" fn kb_emu_label(e: *mut Emu, pos: u8, buf: *mut u8, cap: usize) -> usize {
-    emu(e).map_or(0, |e| {
+pub unsafe extern "C" fn kb_emu_label(e: *mut Emu, pos: u8, buf: *mut u8, cap: usize) -> usize {
+    // SAFETY: `e` is null or live, as this function requires.
+    unsafe { emu(e) }.map_or(0, |e| {
         e.sync_studio();
-        copy_out(e.label(pos).as_bytes(), buf, cap)
+        // SAFETY: `buf` is null or has room for `cap` bytes, as this function requires.
+        unsafe { copy_out(e.label(pos).as_bytes(), buf, cap) }
     })
 }
 
+/// # Safety
+///
+/// `e` is null or an emulator from [`kb_emu_new`] that is not freed yet; `buf`
+/// is null or valid for writing `cap` bytes. Nothing is kept past the call.
 #[unsafe(no_mangle)]
-pub extern "C" fn kb_emu_layer_name(e: *mut Emu, layer: u8, buf: *mut u8, cap: usize) -> usize {
-    emu(e).map_or(0, |e| copy_out(e.layer_name(layer).as_bytes(), buf, cap))
+pub unsafe extern "C" fn kb_emu_layer_name(
+    e: *mut Emu,
+    layer: u8,
+    buf: *mut u8,
+    cap: usize,
+) -> usize {
+    // SAFETY: `e` and `buf` as this function requires.
+    unsafe { emu(e) }.map_or(0, |e| unsafe {
+        copy_out(e.layer_name(layer).as_bytes(), buf, cap)
+    })
 }
 
 /// Short name of a HID usage (`A`, `LSHFT`, `F20`, ...). Returns the full length.
+///
+/// # Safety
+///
+/// `buf` is null or valid for writing `cap` bytes. Nothing is kept past the
+/// call.
 #[unsafe(no_mangle)]
-pub extern "C" fn kb_emu_usage_name(usage: u8, buf: *mut u8, cap: usize) -> usize {
-    copy_out(keys::name(usage).as_bytes(), buf, cap)
+pub unsafe extern "C" fn kb_emu_usage_name(usage: u8, buf: *mut u8, cap: usize) -> usize {
+    // SAFETY: `buf` is null or has room for `cap` bytes, as this function requires.
+    unsafe { copy_out(keys::name(usage).as_bytes(), buf, cap) }
 }
 
 /// Simulated battery level for `half` (0 = left, 1 = right).
+///
+/// # Safety
+///
+/// `e` is null or an emulator from [`kb_emu_new`] that is not freed yet.
+/// Nothing is kept past the call.
 #[unsafe(no_mangle)]
-pub extern "C" fn kb_emu_set_battery(e: *mut Emu, half: u8, percent: u8) {
-    if let Some(e) = emu(e) {
+pub unsafe extern "C" fn kb_emu_set_battery(e: *mut Emu, half: u8, percent: u8) {
+    // SAFETY: `e` is null or live, as this function requires.
+    if let Some(e) = unsafe { emu(e) } {
         e.status_mut().battery[(half as usize).min(1)] = percent.min(100);
     }
 }
 
 /// Switch half `half` (0 left, 1 right) on or off.
+///
+/// # Safety
+///
+/// `e` is null or an emulator from [`kb_emu_new`] that is not freed yet.
+/// Nothing is kept past the call.
 #[unsafe(no_mangle)]
-pub extern "C" fn kb_emu_set_half_power(e: *mut Emu, half: u8, on: bool, now: u32) {
-    if let Some(e) = emu(e) {
+pub unsafe extern "C" fn kb_emu_set_half_power(e: *mut Emu, half: u8, on: bool, now: u32) {
+    // SAFETY: `e` is null or live, as this function requires.
+    if let Some(e) = unsafe { emu(e) } {
         e.set_half_power(half as usize, on, now);
     }
 }
 
 /// Press half `half`'s reset button.
+///
+/// # Safety
+///
+/// `e` is null or an emulator from [`kb_emu_new`] that is not freed yet.
+/// Nothing is kept past the call.
 #[unsafe(no_mangle)]
-pub extern "C" fn kb_emu_reset_half(e: *mut Emu, half: u8, now: u32) {
-    if let Some(e) = emu(e) {
+pub unsafe extern "C" fn kb_emu_reset_half(e: *mut Emu, half: u8, now: u32) {
+    // SAFETY: `e` is null or live, as this function requires.
+    if let Some(e) = unsafe { emu(e) } {
         e.reset_half(half as usize, now);
     }
 }
 
 /// Play the start-up animation again (as after switching the keyboard on).
+///
+/// # Safety
+///
+/// `e` is null or an emulator from [`kb_emu_new`] that is not freed yet.
+/// Nothing is kept past the call.
 #[unsafe(no_mangle)]
-pub extern "C" fn kb_emu_replay_boot(e: *mut Emu) {
-    if let Some(e) = emu(e) {
+pub unsafe extern "C" fn kb_emu_replay_boot(e: *mut Emu) {
+    // SAFETY: `e` is null or live, as this function requires.
+    if let Some(e) = unsafe { emu(e) } {
         e.boot_due = [true, true];
     }
 }
 
 /// Whether half `half` runs on USB power (charging).
+///
+/// # Safety
+///
+/// `e` is null or an emulator from [`kb_emu_new`] that is not freed yet.
+/// Nothing is kept past the call.
 #[unsafe(no_mangle)]
-pub extern "C" fn kb_emu_set_charging(e: *mut Emu, half: u8, charging: bool) {
-    if let Some(e) = emu(e) {
+pub unsafe extern "C" fn kb_emu_set_charging(e: *mut Emu, half: u8, charging: bool) {
+    // SAFETY: `e` is null or live, as this function requires.
+    if let Some(e) = unsafe { emu(e) } {
         e.status_mut().charging[(half as usize).min(1)] = charging;
     }
 }
 
+/// # Safety
+///
+/// `e` is null or an emulator from [`kb_emu_new`] that is not freed yet.
+/// Nothing is kept past the call.
 #[unsafe(no_mangle)]
-pub extern "C" fn kb_emu_set_peripheral_connected(e: *mut Emu, connected: bool) {
-    if let Some(e) = emu(e) {
+pub unsafe extern "C" fn kb_emu_set_peripheral_connected(e: *mut Emu, connected: bool) {
+    // SAFETY: `e` is null or live, as this function requires.
+    if let Some(e) = unsafe { emu(e) } {
         e.status_mut().peripheral_connected = connected;
     }
 }
 
 /// Screen style: 0 = ZMK's built-in screen (landscape), 1 = upright portrait.
+///
+/// # Safety
+///
+/// `e` is null or an emulator from [`kb_emu_new`] that is not freed yet.
+/// Nothing is kept past the call.
 #[unsafe(no_mangle)]
-pub extern "C" fn kb_emu_set_screen_style(e: *mut Emu, style: u8) {
-    if let Some(e) = emu(e) {
+pub unsafe extern "C" fn kb_emu_set_screen_style(e: *mut Emu, style: u8) {
+    // SAFETY: `e` is null or live, as this function requires.
+    if let Some(e) = unsafe { emu(e) } {
         e.set_style(if style == 0 {
             Style::Zmk
         } else {
@@ -1243,25 +1388,43 @@ pub extern "C" fn kb_emu_set_screen_style(e: *mut Emu, style: u8) {
 
 /// Whether the selected Bluetooth profile's computer is connected
 /// (connecting an open profile pairs it).
+///
+/// # Safety
+///
+/// `e` is null or an emulator from [`kb_emu_new`] that is not freed yet.
+/// Nothing is kept past the call.
 #[unsafe(no_mangle)]
-pub extern "C" fn kb_emu_set_profile_connected(e: *mut Emu, connected: bool) {
-    if let Some(e) = emu(e) {
+pub unsafe extern "C" fn kb_emu_set_profile_connected(e: *mut Emu, connected: bool) {
+    // SAFETY: `e` is null or live, as this function requires.
+    if let Some(e) = unsafe { emu(e) } {
         e.set_profile_connected(connected);
     }
 }
 
 /// Mark the selected Bluetooth profile open (nothing paired, `+`) or taken.
+///
+/// # Safety
+///
+/// `e` is null or an emulator from [`kb_emu_new`] that is not freed yet.
+/// Nothing is kept past the call.
 #[unsafe(no_mangle)]
-pub extern "C" fn kb_emu_set_profile_open(e: *mut Emu, open: bool) {
-    if let Some(e) = emu(e) {
+pub unsafe extern "C" fn kb_emu_set_profile_open(e: *mut Emu, open: bool) {
+    // SAFETY: `e` is null or live, as this function requires.
+    if let Some(e) = unsafe { emu(e) } {
         e.set_profile_open(open);
     }
 }
 
 /// Select Bluetooth profile `profile` (0-based, below `kb_emu_profile_count`).
+///
+/// # Safety
+///
+/// `e` is null or an emulator from [`kb_emu_new`] that is not freed yet.
+/// Nothing is kept past the call.
 #[unsafe(no_mangle)]
-pub extern "C" fn kb_emu_set_profile(e: *mut Emu, profile: u8) {
-    if let Some(e) = emu(e) {
+pub unsafe extern "C" fn kb_emu_set_profile(e: *mut Emu, profile: u8) {
+    // SAFETY: `e` is null or live, as this function requires.
+    if let Some(e) = unsafe { emu(e) } {
         e.select_profile(profile);
     }
 }
@@ -1272,30 +1435,57 @@ pub extern "C" fn kb_emu_profile_count() -> u8 {
 }
 
 /// Selected Bluetooth profile, 0-based.
+///
+/// # Safety
+///
+/// `e` is null or an emulator from [`kb_emu_new`] that is not freed yet.
+/// Nothing is kept past the call.
 #[unsafe(no_mangle)]
-pub extern "C" fn kb_emu_profile(e: *mut Emu) -> u8 {
-    emu(e).map_or(0, |e| e.status().profile)
+pub unsafe extern "C" fn kb_emu_profile(e: *mut Emu) -> u8 {
+    // SAFETY: `e` is null or live, as this function requires.
+    unsafe { emu(e) }.map_or(0, |e| e.status().profile)
 }
 
+/// # Safety
+///
+/// `e` is null or an emulator from [`kb_emu_new`] that is not freed yet.
+/// Nothing is kept past the call.
 #[unsafe(no_mangle)]
-pub extern "C" fn kb_emu_profile_open(e: *mut Emu) -> bool {
-    emu(e).is_some_and(|e| e.status().profile_open)
+pub unsafe extern "C" fn kb_emu_profile_open(e: *mut Emu) -> bool {
+    // SAFETY: `e` is null or live, as this function requires.
+    unsafe { emu(e) }.is_some_and(|e| e.status().profile_open)
 }
 
+/// # Safety
+///
+/// `e` is null or an emulator from [`kb_emu_new`] that is not freed yet.
+/// Nothing is kept past the call.
 #[unsafe(no_mangle)]
-pub extern "C" fn kb_emu_profile_connected(e: *mut Emu) -> bool {
-    emu(e).is_some_and(|e| e.status().profile_connected)
+pub unsafe extern "C" fn kb_emu_profile_connected(e: *mut Emu) -> bool {
+    // SAFETY: `e` is null or live, as this function requires.
+    unsafe { emu(e) }.is_some_and(|e| e.status().profile_connected)
 }
 
+/// # Safety
+///
+/// `e` is null or an emulator from [`kb_emu_new`] that is not freed yet.
+/// Nothing is kept past the call.
 #[unsafe(no_mangle)]
-pub extern "C" fn kb_emu_peripheral_connected(e: *mut Emu) -> bool {
-    emu(e).is_some_and(|e| e.status().peripheral_connected)
+pub unsafe extern "C" fn kb_emu_peripheral_connected(e: *mut Emu) -> bool {
+    // SAFETY: `e` is null or live, as this function requires.
+    unsafe { emu(e) }.is_some_and(|e| e.status().peripheral_connected)
 }
 
 /// Output transport: 0 = USB, 1 = Bluetooth.
+///
+/// # Safety
+///
+/// `e` is null or an emulator from [`kb_emu_new`] that is not freed yet.
+/// Nothing is kept past the call.
 #[unsafe(no_mangle)]
-pub extern "C" fn kb_emu_set_transport(e: *mut Emu, transport: u8) {
-    if let Some(e) = emu(e) {
+pub unsafe extern "C" fn kb_emu_set_transport(e: *mut Emu, transport: u8) {
+    // SAFETY: `e` is null or live, as this function requires.
+    if let Some(e) = unsafe { emu(e) } {
         e.set_transport(if transport == 0 {
             Transport::Usb
         } else {
@@ -1305,9 +1495,15 @@ pub extern "C" fn kb_emu_set_transport(e: *mut Emu, transport: u8) {
 }
 
 /// 0 = USB, 1 = Bluetooth.
+///
+/// # Safety
+///
+/// `e` is null or an emulator from [`kb_emu_new`] that is not freed yet.
+/// Nothing is kept past the call.
 #[unsafe(no_mangle)]
-pub extern "C" fn kb_emu_transport(e: *mut Emu) -> u8 {
-    emu(e).map_or(1, |e| match e.status().transport {
+pub unsafe extern "C" fn kb_emu_transport(e: *mut Emu) -> u8 {
+    // SAFETY: `e` is null or live, as this function requires.
+    unsafe { emu(e) }.map_or(1, |e| match e.status().transport {
         Transport::Usb => 0,
         Transport::Ble => 1,
     })
@@ -1320,24 +1516,42 @@ pub extern "C" fn kb_emu_link_stage_count() -> u8 {
 }
 
 /// Name of link stage `index` (empty for 0 or out of range). Returns the full length.
+///
+/// # Safety
+///
+/// `buf` is null or valid for writing `cap` bytes. Nothing is kept past the
+/// call.
 #[unsafe(no_mangle)]
-pub extern "C" fn kb_emu_link_stage_name(index: u8, buf: *mut u8, cap: usize) -> usize {
+pub unsafe extern "C" fn kb_emu_link_stage_name(index: u8, buf: *mut u8, cap: usize) -> usize {
     let name = LINK_STAGES.get(index as usize).copied().unwrap_or("");
-    copy_out(name.as_bytes(), buf, cap)
+    // SAFETY: `buf` is null or has room for `cap` bytes, as this function requires.
+    unsafe { copy_out(name.as_bytes(), buf, cap) }
 }
 
 /// Show split link stage `index` at the bottom of the OLEDs (0 or out of range hides it).
+///
+/// # Safety
+///
+/// `e` is null or an emulator from [`kb_emu_new`] that is not freed yet.
+/// Nothing is kept past the call.
 #[unsafe(no_mangle)]
-pub extern "C" fn kb_emu_set_link_stage(e: *mut Emu, index: u8) {
-    if let Some(e) = emu(e) {
+pub unsafe extern "C" fn kb_emu_set_link_stage(e: *mut Emu, index: u8) {
+    // SAFETY: `e` is null or live, as this function requires.
+    if let Some(e) = unsafe { emu(e) } {
         e.set_link_stage(index as usize);
     }
 }
 
 /// Index of the link stage shown (0 = hidden).
+///
+/// # Safety
+///
+/// `e` is null or an emulator from [`kb_emu_new`] that is not freed yet.
+/// Nothing is kept past the call.
 #[unsafe(no_mangle)]
-pub extern "C" fn kb_emu_link_stage(e: *mut Emu) -> u8 {
-    emu(e).map_or(0, |e| {
+pub unsafe extern "C" fn kb_emu_link_stage(e: *mut Emu) -> u8 {
+    // SAFETY: `e` is null or live, as this function requires.
+    unsafe { emu(e) }.map_or(0, |e| {
         LINK_STAGES
             .iter()
             .position(|&s| s == e.status().link_detail)
@@ -1347,9 +1561,21 @@ pub extern "C" fn kb_emu_link_stage(e: *mut Emu) -> u8 {
 
 /// Feed one Raw HID report (32 bytes) from the computer. Returns a
 /// [`RawHidResult`]: 0 pending, 1 delivered, 2 right half not linked, 3 cleared, 4 asleep.
+///
+/// # Safety
+///
+/// `e` is null or an emulator from [`kb_emu_new`] that is not freed yet;
+/// `report` is null or points to `len` readable bytes. Nothing is kept past the
+/// call.
 #[unsafe(no_mangle)]
-pub extern "C" fn kb_emu_raw_hid(e: *mut Emu, report: *const u8, len: usize, now_ms: u32) -> u8 {
-    let Some(e) = emu(e) else {
+pub unsafe extern "C" fn kb_emu_raw_hid(
+    e: *mut Emu,
+    report: *const u8,
+    len: usize,
+    now_ms: u32,
+) -> u8 {
+    // SAFETY: `e` is null or live, as this function requires.
+    let Some(e) = (unsafe { emu(e) }) else {
         return RawHidResult::Pending as u8;
     };
     if report.is_null() {
@@ -1364,15 +1590,23 @@ pub extern "C" fn kb_emu_raw_hid(e: *mut Emu, report: *const u8, len: usize, now
 /// transaction, all to address 0x3C. Returns the total length; if it is
 /// larger than `cap` nothing is written and the call should be repeated
 /// with a bigger buffer (the writes are kept until then).
+///
+/// # Safety
+///
+/// `e` is null or an emulator from [`kb_emu_new`] that is not freed yet; `buf`
+/// is null or valid for writing `cap` bytes. Nothing is kept past the call.
 #[unsafe(no_mangle)]
-pub extern "C" fn kb_emu_display(
+pub unsafe extern "C" fn kb_emu_display(
     e: *mut Emu,
     half: u8,
     now_ms: u32,
     buf: *mut u8,
     cap: usize,
 ) -> usize {
-    let Some(e) = emu(e) else { return 0 };
+    // SAFETY: `e` is null or live, as this function requires.
+    let Some(e) = (unsafe { emu(e) }) else {
+        return 0;
+    };
     let half = (half as usize).min(1);
     let snapshot = e.shown[half].clone();
     let writes = e.display_writes(half, now_ms);
@@ -1385,7 +1619,8 @@ pub extern "C" fn kb_emu_display(
         e.shown[half] = snapshot; // not delivered: resend next time
         return framed.len();
     }
-    copy_out(&framed, buf, cap)
+    // SAFETY: `buf` is null or has room for `cap` bytes, as this function requires.
+    unsafe { copy_out(&framed, buf, cap) }
 }
 
 // ---- Mouse --------------------------------------------------------------------
@@ -1412,9 +1647,15 @@ pub struct KbMouse {
 }
 
 /// Fill `out` with the mouse state. False for a null pointer.
+///
+/// # Safety
+///
+/// `e` is null or an emulator from [`kb_emu_new`] that is not freed yet; `out`
+/// is null or valid for writing one [`KbMouse`]. Nothing is kept past the call.
 #[unsafe(no_mangle)]
-pub extern "C" fn kb_emu_mouse_state(e: *mut Emu, out: *mut KbMouse) -> bool {
-    let (Some(e), false) = (emu(e), out.is_null()) else {
+pub unsafe extern "C" fn kb_emu_mouse_state(e: *mut Emu, out: *mut KbMouse) -> bool {
+    // SAFETY: `e` is null or live, as this function requires.
+    let (Some(e), false) = (unsafe { emu(e) }, out.is_null()) else {
         return false;
     };
     let t = e.mouse_totals;
@@ -1439,17 +1680,33 @@ pub extern "C" fn kb_emu_mouse_state(e: *mut Emu, out: *mut KbMouse) -> bool {
 /// The emulated computer sets (or clears) the Resolution Multipliers, as
 /// Windows and Linux do: then the wheel and pan move in 1/16 detents
 /// (smooth scrolling). A new emulator starts with whole detents (as macOS).
+///
+/// # Safety
+///
+/// `e` is null or an emulator from [`kb_emu_new`] that is not freed yet.
+/// Nothing is kept past the call.
 #[unsafe(no_mangle)]
-pub extern "C" fn kb_emu_mouse_set_resolution(e: *mut Emu, wheel_hires: bool, pan_hires: bool) {
-    if let Some(e) = emu(e) {
+pub unsafe extern "C" fn kb_emu_mouse_set_resolution(
+    e: *mut Emu,
+    wheel_hires: bool,
+    pan_hires: bool,
+) {
+    // SAFETY: `e` is null or live, as this function requires.
+    if let Some(e) = unsafe { emu(e) } {
         e.mouse.set_resolution(wheel_hires, pan_hires);
     }
 }
 
 /// Set the summed pointer position (and wheel / pan) back to 0.
+///
+/// # Safety
+///
+/// `e` is null or an emulator from [`kb_emu_new`] that is not freed yet.
+/// Nothing is kept past the call.
 #[unsafe(no_mangle)]
-pub extern "C" fn kb_emu_mouse_reset_position(e: *mut Emu) {
-    if let Some(e) = emu(e) {
+pub unsafe extern "C" fn kb_emu_mouse_reset_position(e: *mut Emu) {
+    // SAFETY: `e` is null or live, as this function requires.
+    if let Some(e) = unsafe { emu(e) } {
         let buttons = e.mouse_totals.buttons;
         e.mouse_totals = MouseTotals {
             buttons,
@@ -1492,11 +1749,16 @@ pub extern "C" fn kb_emu_mouse_reset_position(e: *mut Emu) {
 // text file (`kb_emu_studio_set_storage_path`).
 
 /// Text from the caller: `len` bytes at `ptr`, UTF-8.
-fn text_in<'a>(ptr: *const u8, len: usize) -> Option<&'a str> {
+///
+/// # Safety
+///
+/// `ptr` is null or points to `len` readable bytes that stay unchanged
+/// while the text lives.
+unsafe fn text_in<'a>(ptr: *const u8, len: usize) -> Option<&'a str> {
     if ptr.is_null() {
         return (len == 0).then_some("");
     }
-    // SAFETY: the caller passes `len` readable bytes at `ptr`.
+    // SAFETY: `len` readable bytes at `ptr`, as this function requires.
     std::str::from_utf8(unsafe { std::slice::from_raw_parts(ptr, len) }).ok()
 }
 
@@ -1535,50 +1797,80 @@ pub extern "C" fn kb_emu_studio_layer_count() -> u8 {
 
 /// The live binding of `pos` on `layer`, encoded (no `trans` fall-through).
 /// 0 for a layer or position out of range.
+///
+/// # Safety
+///
+/// `e` is null or an emulator from [`kb_emu_new`] that is not freed yet; `buf`
+/// is null or valid for writing `cap` bytes. Nothing is kept past the call.
 #[unsafe(no_mangle)]
-pub extern "C" fn kb_emu_studio_binding(
+pub unsafe extern "C" fn kb_emu_studio_binding(
     e: *mut Emu,
     layer: u8,
     pos: u8,
     buf: *mut u8,
     cap: usize,
 ) -> usize {
-    emu(e)
+    // SAFETY: `e` is null or live, as this function requires.
+    unsafe { emu(e) }
         .and_then(|e| e.studio.studio.binding(layer, pos))
         .map_or(0, |a| {
-            copy_out(
-                kb_core::studio::encoding::encoded(a).as_str().as_bytes(),
-                buf,
-                cap,
-            )
+            // SAFETY: `buf` is null or has room for `cap` bytes, as this function requires.
+            unsafe {
+                copy_out(
+                    kb_core::studio::encoding::encoded(a).as_str().as_bytes(),
+                    buf,
+                    cap,
+                )
+            }
         })
 }
 
 /// The compiled (default) binding of `pos` on `layer`, encoded.
+///
+/// # Safety
+///
+/// `e` is null or an emulator from [`kb_emu_new`] that is not freed yet; `buf`
+/// is null or valid for writing `cap` bytes. Nothing is kept past the call.
 #[unsafe(no_mangle)]
-pub extern "C" fn kb_emu_studio_default_binding(
+pub unsafe extern "C" fn kb_emu_studio_default_binding(
     e: *mut Emu,
     layer: u8,
     pos: u8,
     buf: *mut u8,
     cap: usize,
 ) -> usize {
-    emu(e)
+    // SAFETY: `e` is null or live, as this function requires.
+    unsafe { emu(e) }
         .and_then(|e| e.studio.studio.default_binding(layer, pos))
         .map_or(0, |a| {
-            copy_out(
-                kb_core::studio::encoding::encoded(a).as_str().as_bytes(),
-                buf,
-                cap,
-            )
+            // SAFETY: `buf` is null or has room for `cap` bytes, as this function requires.
+            unsafe {
+                copy_out(
+                    kb_core::studio::encoding::encoded(a).as_str().as_bytes(),
+                    buf,
+                    cap,
+                )
+            }
         })
 }
 
 /// All live bindings of `layer`, encoded, separated by single spaces (the
 /// payload of a `#L` line). 0 for a layer out of range.
+///
+/// # Safety
+///
+/// `e` is null or an emulator from [`kb_emu_new`] that is not freed yet; `buf`
+/// is null or valid for writing `cap` bytes. Nothing is kept past the call.
 #[unsafe(no_mangle)]
-pub extern "C" fn kb_emu_studio_layer(e: *mut Emu, layer: u8, buf: *mut u8, cap: usize) -> usize {
-    let Some(actions) = emu(e).and_then(|e| e.studio.studio.layers().get(layer as usize).copied())
+pub unsafe extern "C" fn kb_emu_studio_layer(
+    e: *mut Emu,
+    layer: u8,
+    buf: *mut u8,
+    cap: usize,
+) -> usize {
+    // SAFETY: `e` is null or live, as this function requires.
+    let Some(actions) =
+        unsafe { emu(e) }.and_then(|e| e.studio.studio.layers().get(layer as usize).copied())
     else {
         return 0;
     };
@@ -1586,12 +1878,18 @@ pub extern "C" fn kb_emu_studio_layer(e: *mut Emu, layer: u8, buf: *mut u8, cap:
         .iter()
         .map(|&a| kb_core::studio::encoding::encoded(a).as_str().to_string())
         .collect();
-    copy_out(text.join(" ").as_bytes(), buf, cap)
+    // SAFETY: `buf` is null or has room for `cap` bytes, as this function requires.
+    unsafe { copy_out(text.join(" ").as_bytes(), buf, cap) }
 }
 
 /// Bind the action `enc` (`len` bytes) to `pos` on `layer`, live. Result code.
+///
+/// # Safety
+///
+/// `e` is null or an emulator from [`kb_emu_new`] that is not freed yet; `enc`
+/// is null or points to `len` readable bytes. Nothing is kept past the call.
 #[unsafe(no_mangle)]
-pub extern "C" fn kb_emu_studio_set(
+pub unsafe extern "C" fn kb_emu_studio_set(
     e: *mut Emu,
     layer: u8,
     pos: u8,
@@ -1599,7 +1897,8 @@ pub extern "C" fn kb_emu_studio_set(
     len: usize,
     now_ms: u32,
 ) -> i32 {
-    let (Some(e), Some(text)) = (emu(e), text_in(enc, len)) else {
+    // SAFETY: `e` and the text as this function requires.
+    let (Some(e), Some(text)) = (unsafe { emu(e) }, unsafe { text_in(enc, len) }) else {
         return -1;
     };
     let result = e.studio.set(layer, pos, text, now_ms);
@@ -1609,30 +1908,48 @@ pub extern "C" fn kb_emu_studio_set(
 
 /// Whether `enc` could be bound to `pos` on `layer` (all checks but the
 /// lock; nothing changes). Result code (never 1).
+///
+/// # Safety
+///
+/// `e` is null or an emulator from [`kb_emu_new`] that is not freed yet; `enc`
+/// is null or points to `len` readable bytes. Nothing is kept past the call.
 #[unsafe(no_mangle)]
-pub extern "C" fn kb_emu_studio_check(
+pub unsafe extern "C" fn kb_emu_studio_check(
     e: *mut Emu,
     layer: u8,
     pos: u8,
     enc: *const u8,
     len: usize,
 ) -> i32 {
-    let (Some(e), Some(text)) = (emu(e), text_in(enc, len)) else {
+    // SAFETY: `e` and the text as this function requires.
+    let (Some(e), Some(text)) = (unsafe { emu(e) }, unsafe { text_in(enc, len) }) else {
         return -1;
     };
     studio_code(e.studio.check(layer, pos, text))
 }
 
 /// Keep the live bindings (to the storage file, if one is set). Result code.
+///
+/// # Safety
+///
+/// `e` is null or an emulator from [`kb_emu_new`] that is not freed yet.
+/// Nothing is kept past the call.
 #[unsafe(no_mangle)]
-pub extern "C" fn kb_emu_studio_save(e: *mut Emu, now_ms: u32) -> i32 {
-    emu(e).map_or(-1, |e| stored_code(e.studio.save(now_ms)))
+pub unsafe extern "C" fn kb_emu_studio_save(e: *mut Emu, now_ms: u32) -> i32 {
+    // SAFETY: `e` is null or live, as this function requires.
+    unsafe { emu(e) }.map_or(-1, |e| stored_code(e.studio.save(now_ms)))
 }
 
 /// Drop unsaved edits (back to the saved bindings). Works locked. Result code (0).
+///
+/// # Safety
+///
+/// `e` is null or an emulator from [`kb_emu_new`] that is not freed yet.
+/// Nothing is kept past the call.
 #[unsafe(no_mangle)]
-pub extern "C" fn kb_emu_studio_revert(e: *mut Emu) -> i32 {
-    emu(e).map_or(-1, |e| {
+pub unsafe extern "C" fn kb_emu_studio_revert(e: *mut Emu) -> i32 {
+    // SAFETY: `e` is null or live, as this function requires.
+    unsafe { emu(e) }.map_or(-1, |e| {
         e.studio.studio.revert();
         e.sync_studio();
         0
@@ -1640,9 +1957,15 @@ pub extern "C" fn kb_emu_studio_revert(e: *mut Emu) -> i32 {
 }
 
 /// Back to the compiled keymap, live and in storage. Result code.
+///
+/// # Safety
+///
+/// `e` is null or an emulator from [`kb_emu_new`] that is not freed yet.
+/// Nothing is kept past the call.
 #[unsafe(no_mangle)]
-pub extern "C" fn kb_emu_studio_reset(e: *mut Emu, now_ms: u32) -> i32 {
-    emu(e).map_or(-1, |e| {
+pub unsafe extern "C" fn kb_emu_studio_reset(e: *mut Emu, now_ms: u32) -> i32 {
+    // SAFETY: `e` is null or live, as this function requires.
+    unsafe { emu(e) }.map_or(-1, |e| {
         let result = e.studio.reset(now_ms);
         e.sync_studio();
         stored_code(result)
@@ -1650,30 +1973,54 @@ pub extern "C" fn kb_emu_studio_reset(e: *mut Emu, now_ms: u32) -> i32 {
 }
 
 /// Lock Studio now.
+///
+/// # Safety
+///
+/// `e` is null or an emulator from [`kb_emu_new`] that is not freed yet.
+/// Nothing is kept past the call.
 #[unsafe(no_mangle)]
-pub extern "C" fn kb_emu_studio_lock(e: *mut Emu, now_ms: u32) {
-    if let Some(e) = emu(e) {
+pub unsafe extern "C" fn kb_emu_studio_lock(e: *mut Emu, now_ms: u32) {
+    // SAFETY: `e` is null or live, as this function requires.
+    if let Some(e) = unsafe { emu(e) } {
         e.studio.studio.lock();
         e.studio_status(now_ms);
     }
 }
 
 /// Milliseconds until Studio locks itself; 0 = locked.
+///
+/// # Safety
+///
+/// `e` is null or an emulator from [`kb_emu_new`] that is not freed yet.
+/// Nothing is kept past the call.
 #[unsafe(no_mangle)]
-pub extern "C" fn kb_emu_studio_unlock_remaining_ms(e: *mut Emu, now_ms: u32) -> u32 {
-    emu(e).map_or(0, |e| e.studio.studio.remaining_ms(now_ms))
+pub unsafe extern "C" fn kb_emu_studio_unlock_remaining_ms(e: *mut Emu, now_ms: u32) -> u32 {
+    // SAFETY: `e` is null or live, as this function requires.
+    unsafe { emu(e) }.map_or(0, |e| e.studio.studio.remaining_ms(now_ms))
 }
 
 /// Whether the live bindings differ from what is saved.
+///
+/// # Safety
+///
+/// `e` is null or an emulator from [`kb_emu_new`] that is not freed yet.
+/// Nothing is kept past the call.
 #[unsafe(no_mangle)]
-pub extern "C" fn kb_emu_studio_dirty(e: *mut Emu) -> bool {
-    emu(e).is_some_and(|e| e.studio.studio.dirty())
+pub unsafe extern "C" fn kb_emu_studio_dirty(e: *mut Emu) -> bool {
+    // SAFETY: `e` is null or live, as this function requires.
+    unsafe { emu(e) }.is_some_and(|e| e.studio.studio.dirty())
 }
 
 /// Counts changes of the live bindings (wrapping): refresh when it changes.
+///
+/// # Safety
+///
+/// `e` is null or an emulator from [`kb_emu_new`] that is not freed yet.
+/// Nothing is kept past the call.
 #[unsafe(no_mangle)]
-pub extern "C" fn kb_emu_studio_generation(e: *mut Emu) -> u32 {
-    emu(e).map_or(0, |e| e.studio.studio.generation())
+pub unsafe extern "C" fn kb_emu_studio_generation(e: *mut Emu) -> u32 {
+    // SAFETY: `e` is null or live, as this function requires.
+    unsafe { emu(e) }.map_or(0, |e| e.studio.studio.generation())
 }
 
 /// Keep Studio's edits in the file at `path` (`len` bytes, UTF-8; null or
@@ -1682,9 +2029,19 @@ pub extern "C" fn kb_emu_studio_generation(e: *mut Emu) -> u32 {
 /// 1 ignored (unreadable, other version, bad line: compiled keymap),
 /// 2 dropped (it would lock Studio out: compiled keymap, file cleared),
 /// -1 bad arguments.
+///
+/// # Safety
+///
+/// `e` is null or an emulator from [`kb_emu_new`] that is not freed yet; `path`
+/// is null or points to `len` readable bytes. Nothing is kept past the call.
 #[unsafe(no_mangle)]
-pub extern "C" fn kb_emu_studio_set_storage_path(e: *mut Emu, path: *const u8, len: usize) -> i32 {
-    let (Some(e), Some(path)) = (emu(e), text_in(path, len)) else {
+pub unsafe extern "C" fn kb_emu_studio_set_storage_path(
+    e: *mut Emu,
+    path: *const u8,
+    len: usize,
+) -> i32 {
+    // SAFETY: `e` and the text as this function requires.
+    let (Some(e), Some(path)) = (unsafe { emu(e) }, unsafe { text_in(path, len) }) else {
         return -1;
     };
     let path = (!path.is_empty()).then(|| std::path::PathBuf::from(path));
@@ -1697,14 +2054,20 @@ pub extern "C" fn kb_emu_studio_set_storage_path(e: *mut Emu, path: *const u8, l
 /// would (`#studio get`, `#studio set 0 12 kp:A`, ...; no line end needed).
 /// The answers come from `kb_emu_studio_next_line`. Returns false (and does
 /// nothing) for a line that isn't a `#studio` command.
+///
+/// # Safety
+///
+/// `e` is null or an emulator from [`kb_emu_new`] that is not freed yet; `line`
+/// is null or points to `len` readable bytes. Nothing is kept past the call.
 #[unsafe(no_mangle)]
-pub extern "C" fn kb_emu_studio_command(
+pub unsafe extern "C" fn kb_emu_studio_command(
     e: *mut Emu,
     line: *const u8,
     len: usize,
     now_ms: u32,
 ) -> bool {
-    let (Some(e), Some(line)) = (emu(e), text_in(line, len)) else {
+    // SAFETY: `e` and the text as this function requires.
+    let (Some(e), Some(line)) = (unsafe { emu(e) }, unsafe { text_in(line, len) }) else {
         return false;
     };
     let taken = e.studio.command(line.as_bytes(), now_ms);
@@ -1718,20 +2081,29 @@ pub extern "C" fn kb_emu_studio_command(
 /// Returns its length, 0 when there is none. The line is only consumed when
 /// it fits in `cap`; otherwise call again with a buffer of at least the
 /// returned length (`kb_emu_studio_line_max` always fits).
+///
+/// # Safety
+///
+/// `e` is null or an emulator from [`kb_emu_new`] that is not freed yet; `buf`
+/// is null or valid for writing `cap` bytes. Nothing is kept past the call.
 #[unsafe(no_mangle)]
-pub extern "C" fn kb_emu_studio_next_line(
+pub unsafe extern "C" fn kb_emu_studio_next_line(
     e: *mut Emu,
     now_ms: u32,
     buf: *mut u8,
     cap: usize,
 ) -> usize {
-    let Some(e) = emu(e) else { return 0 };
+    // SAFETY: `e` is null or live, as this function requires.
+    let Some(e) = (unsafe { emu(e) }) else {
+        return 0;
+    };
     let Some(line) = e.studio.next_line(now_ms) else {
         return 0;
     };
     let len = line.len();
     if len <= cap && !buf.is_null() {
-        copy_out(line.as_bytes(), buf, cap);
+        // SAFETY: `buf` is null or has room for `cap` bytes, as this function requires.
+        unsafe { copy_out(line.as_bytes(), buf, cap) };
         e.studio.line_taken();
     }
     len
@@ -1750,48 +2122,89 @@ pub extern "C" fn kb_emu_studio_combo_max() -> u8 {
 }
 
 /// Number of live combos.
+///
+/// # Safety
+///
+/// `e` is null or an emulator from [`kb_emu_new`] that is not freed yet.
+/// Nothing is kept past the call.
 #[unsafe(no_mangle)]
-pub extern "C" fn kb_emu_studio_combo_count(e: *mut Emu) -> u8 {
-    emu(e).map_or(0, |e| e.studio.studio.combos().len() as u8)
+pub unsafe extern "C" fn kb_emu_studio_combo_count(e: *mut Emu) -> u8 {
+    // SAFETY: `e` is null or live, as this function requires.
+    unsafe { emu(e) }.map_or(0, |e| e.studio.studio.combos().len() as u8)
 }
 
 /// Live combo `index` as its six words; 0 past the last.
+///
+/// # Safety
+///
+/// `e` is null or an emulator from [`kb_emu_new`] that is not freed yet; `buf`
+/// is null or valid for writing `cap` bytes. Nothing is kept past the call.
 #[unsafe(no_mangle)]
-pub extern "C" fn kb_emu_studio_combo(e: *mut Emu, index: u8, buf: *mut u8, cap: usize) -> usize {
-    emu(e)
-        .and_then(|e| e.studio.studio.combos().get(index as usize))
-        .map_or(0, |c| copy_out(studio::combo_text(&c).as_bytes(), buf, cap))
-}
-
-/// Number of compiled combos.
-#[unsafe(no_mangle)]
-pub extern "C" fn kb_emu_studio_default_combo_count(e: *mut Emu) -> u8 {
-    emu(e).map_or(0, |e| e.studio.studio.default_combos().len() as u8)
-}
-
-/// Compiled combo `index` as its six words; 0 past the last.
-#[unsafe(no_mangle)]
-pub extern "C" fn kb_emu_studio_default_combo(
+pub unsafe extern "C" fn kb_emu_studio_combo(
     e: *mut Emu,
     index: u8,
     buf: *mut u8,
     cap: usize,
 ) -> usize {
-    emu(e)
+    // SAFETY: `e` is null or live, as this function requires.
+    unsafe { emu(e) }
+        .and_then(|e| e.studio.studio.combos().get(index as usize))
+        // SAFETY: `buf` is null or has room for `cap` bytes, as this function requires.
+        .map_or(0, |c| unsafe {
+            copy_out(studio::combo_text(&c).as_bytes(), buf, cap)
+        })
+}
+
+/// Number of compiled combos.
+///
+/// # Safety
+///
+/// `e` is null or an emulator from [`kb_emu_new`] that is not freed yet.
+/// Nothing is kept past the call.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn kb_emu_studio_default_combo_count(e: *mut Emu) -> u8 {
+    // SAFETY: `e` is null or live, as this function requires.
+    unsafe { emu(e) }.map_or(0, |e| e.studio.studio.default_combos().len() as u8)
+}
+
+/// Compiled combo `index` as its six words; 0 past the last.
+///
+/// # Safety
+///
+/// `e` is null or an emulator from [`kb_emu_new`] that is not freed yet; `buf`
+/// is null or valid for writing `cap` bytes. Nothing is kept past the call.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn kb_emu_studio_default_combo(
+    e: *mut Emu,
+    index: u8,
+    buf: *mut u8,
+    cap: usize,
+) -> usize {
+    // SAFETY: `e` is null or live, as this function requires.
+    unsafe { emu(e) }
         .and_then(|e| e.studio.studio.default_combos().get(index as usize))
-        .map_or(0, |c| copy_out(studio::combo_text(&c).as_bytes(), buf, cap))
+        // SAFETY: `buf` is null or has room for `cap` bytes, as this function requires.
+        .map_or(0, |c| unsafe {
+            copy_out(studio::combo_text(&c).as_bytes(), buf, cap)
+        })
 }
 
 /// Add the combo `text` (six words) at the end, live. Result code; on 0
 /// its index is `kb_emu_studio_combo_count() - 1`.
+///
+/// # Safety
+///
+/// `e` is null or an emulator from [`kb_emu_new`] that is not freed yet; `text`
+/// is null or points to `len` readable bytes. Nothing is kept past the call.
 #[unsafe(no_mangle)]
-pub extern "C" fn kb_emu_studio_combo_add(
+pub unsafe extern "C" fn kb_emu_studio_combo_add(
     e: *mut Emu,
     text: *const u8,
     len: usize,
     now_ms: u32,
 ) -> i32 {
-    let (Some(e), Some(text)) = (emu(e), text_in(text, len)) else {
+    // SAFETY: `e` and the text as this function requires.
+    let (Some(e), Some(text)) = (unsafe { emu(e) }, unsafe { text_in(text, len) }) else {
         return -1;
     };
     let result = e.studio.combo_add(text, now_ms).map(|_| ());
@@ -1800,15 +2213,21 @@ pub extern "C" fn kb_emu_studio_combo_add(
 }
 
 /// Replace combo `index` with `text` (six words), live. Result code.
+///
+/// # Safety
+///
+/// `e` is null or an emulator from [`kb_emu_new`] that is not freed yet; `text`
+/// is null or points to `len` readable bytes. Nothing is kept past the call.
 #[unsafe(no_mangle)]
-pub extern "C" fn kb_emu_studio_combo_set(
+pub unsafe extern "C" fn kb_emu_studio_combo_set(
     e: *mut Emu,
     index: u8,
     text: *const u8,
     len: usize,
     now_ms: u32,
 ) -> i32 {
-    let (Some(e), Some(text)) = (emu(e), text_in(text, len)) else {
+    // SAFETY: `e` and the text as this function requires.
+    let (Some(e), Some(text)) = (unsafe { emu(e) }, unsafe { text_in(text, len) }) else {
         return -1;
     };
     let result = e.studio.combo_set(index, text, now_ms);
@@ -1817,9 +2236,15 @@ pub extern "C" fn kb_emu_studio_combo_set(
 }
 
 /// Remove combo `index` (the later ones move down), live. Result code.
+///
+/// # Safety
+///
+/// `e` is null or an emulator from [`kb_emu_new`] that is not freed yet.
+/// Nothing is kept past the call.
 #[unsafe(no_mangle)]
-pub extern "C" fn kb_emu_studio_combo_remove(e: *mut Emu, index: u8, now_ms: u32) -> i32 {
-    emu(e).map_or(-1, |e| {
+pub unsafe extern "C" fn kb_emu_studio_combo_remove(e: *mut Emu, index: u8, now_ms: u32) -> i32 {
+    // SAFETY: `e` is null or live, as this function requires.
+    unsafe { emu(e) }.map_or(-1, |e| {
         let result = e.studio.studio.remove_combo(index, now_ms);
         e.sync_studio();
         studio_code(result)
@@ -1828,14 +2253,20 @@ pub extern "C" fn kb_emu_studio_combo_remove(e: *mut Emu, index: u8, now_ms: u32
 
 /// Whether `text` could be combo `index` (255: added as a new one): all
 /// checks but the lock, nothing changes. Result code (never 1).
+///
+/// # Safety
+///
+/// `e` is null or an emulator from [`kb_emu_new`] that is not freed yet; `text`
+/// is null or points to `len` readable bytes. Nothing is kept past the call.
 #[unsafe(no_mangle)]
-pub extern "C" fn kb_emu_studio_combo_check(
+pub unsafe extern "C" fn kb_emu_studio_combo_check(
     e: *mut Emu,
     index: u8,
     text: *const u8,
     len: usize,
 ) -> i32 {
-    let (Some(e), Some(text)) = (emu(e), text_in(text, len)) else {
+    // SAFETY: `e` and the text as this function requires.
+    let (Some(e), Some(text)) = (unsafe { emu(e) }, unsafe { text_in(text, len) }) else {
         return -1;
     };
     let index = (index != 255).then_some(index);
@@ -1843,68 +2274,103 @@ pub extern "C" fn kb_emu_studio_combo_check(
 }
 
 /// Whether combo `index` could be removed (all checks but the lock).
+///
+/// # Safety
+///
+/// `e` is null or an emulator from [`kb_emu_new`] that is not freed yet.
+/// Nothing is kept past the call.
 #[unsafe(no_mangle)]
-pub extern "C" fn kb_emu_studio_combo_check_remove(e: *mut Emu, index: u8) -> i32 {
-    emu(e).map_or(-1, |e| {
+pub unsafe extern "C" fn kb_emu_studio_combo_check_remove(e: *mut Emu, index: u8) -> i32 {
+    // SAFETY: `e` is null or live, as this function requires.
+    unsafe { emu(e) }.map_or(-1, |e| {
         studio_code(e.studio.studio.check_remove_combo(index))
     })
 }
 
 /// The canonical encoding of `enc` (e.g. `MT:lalt/tab` → `mt:LALT/TAB`).
 /// Returns its length, or -1 if `enc` is not an action.
+///
+/// # Safety
+///
+/// `enc` is null or points to `len` readable bytes; `buf` is null or valid for
+/// writing `cap` bytes. Nothing is kept past the call.
 #[unsafe(no_mangle)]
-pub extern "C" fn kb_emu_studio_canonical(
+pub unsafe extern "C" fn kb_emu_studio_canonical(
     enc: *const u8,
     len: usize,
     buf: *mut u8,
     cap: usize,
 ) -> i64 {
-    let Some(action) = text_in(enc, len).and_then(|t| kb_core::studio::encoding::decode(t).ok())
+    // SAFETY: `enc` and `len` as this function requires.
+    let Some(action) =
+        unsafe { text_in(enc, len) }.and_then(|t| kb_core::studio::encoding::decode(t).ok())
     else {
         return -1;
     };
-    copy_out(
-        kb_core::studio::encoding::encoded(action)
-            .as_str()
-            .as_bytes(),
-        buf,
-        cap,
-    ) as i64
+    // SAFETY: `buf` is null or has room for `cap` bytes, as this function requires.
+    (unsafe {
+        copy_out(
+            kb_core::studio::encoding::encoded(action)
+                .as_str()
+                .as_bytes(),
+            buf,
+            cap,
+        )
+    }) as i64
 }
 
 /// The key legend for the action `enc` (as `kb_emu_label` draws it: two
 /// lines `tap\nhold` for a mod-tap, the layer name for `mo`). Empty for
 /// `trans`, `none` and anything that is not an action.
+///
+/// # Safety
+///
+/// `enc` is null or points to `len` readable bytes; `buf` is null or valid for
+/// writing `cap` bytes. Nothing is kept past the call.
 #[unsafe(no_mangle)]
-pub extern "C" fn kb_emu_studio_label(
+pub unsafe extern "C" fn kb_emu_studio_label(
     enc: *const u8,
     len: usize,
     buf: *mut u8,
     cap: usize,
 ) -> usize {
-    let label = text_in(enc, len)
+    // SAFETY: `enc` and `len` as this function requires.
+    let label = unsafe { text_in(enc, len) }
         .and_then(|t| kb_core::studio::encoding::decode(t).ok())
         .map(action_label)
         .unwrap_or_default();
-    copy_out(label.as_bytes(), buf, cap)
+    // SAFETY: `buf` is null or has room for `cap` bytes, as this function requires.
+    unsafe { copy_out(label.as_bytes(), buf, cap) }
 }
 
 /// Key name number `index` for a picker (`A`, ..., `RGUI`, then the
 /// aliases `EXCL`, ..., `MEH`): what `kp:` / `mt:` take. 0 past the last.
+///
+/// # Safety
+///
+/// `buf` is null or valid for writing `cap` bytes. Nothing is kept past the
+/// call.
 #[unsafe(no_mangle)]
-pub extern "C" fn kb_emu_studio_key_name(index: u32, buf: *mut u8, cap: usize) -> usize {
+pub unsafe extern "C" fn kb_emu_studio_key_name(index: u32, buf: *mut u8, cap: usize) -> usize {
     kb_core::studio::encoding::key_names()
         .nth(index as usize)
-        .map_or(0, |n| copy_out(n.as_bytes(), buf, cap))
+        // SAFETY: `buf` is null or has room for `cap` bytes, as this function requires.
+        .map_or(0, |n| unsafe { copy_out(n.as_bytes(), buf, cap) })
 }
 
 /// System action name number `index` (`BtPrev`, ..., what `sys:` takes);
 /// 0 past the last.
+///
+/// # Safety
+///
+/// `buf` is null or valid for writing `cap` bytes. Nothing is kept past the
+/// call.
 #[unsafe(no_mangle)]
-pub extern "C" fn kb_emu_studio_system_name(index: u32, buf: *mut u8, cap: usize) -> usize {
+pub unsafe extern "C" fn kb_emu_studio_system_name(index: u32, buf: *mut u8, cap: usize) -> usize {
     SystemAction::ALL
         .get(index as usize)
-        .map_or(0, |s| copy_out(s.name().as_bytes(), buf, cap))
+        // SAFETY: `buf` is null or has room for `cap` bytes, as this function requires.
+        .map_or(0, |s| unsafe { copy_out(s.name().as_bytes(), buf, cap) })
 }
 
 #[cfg(test)]
@@ -2090,15 +2556,19 @@ mod tests {
 
     #[test]
     fn link_stage_ffi_round_trips_its_index() {
-        // Arrange
-        let e = kb_emu_new();
+        // SAFETY: the emulator pointers are null or to this test's live `Emu`,
+        // and every buffer is valid for the length passed with it.
+        unsafe {
+            // Arrange
+            let e = kb_emu_new();
 
-        // Act
-        kb_emu_set_link_stage(e, 11);
+            // Act
+            kb_emu_set_link_stage(e, 11);
 
-        // Assert
-        assert_eq!(kb_emu_link_stage(e), 11);
-        kb_emu_free(e);
+            // Assert
+            assert_eq!(kb_emu_link_stage(e), 11);
+            kb_emu_free(e);
+        }
     }
 
     #[test]
@@ -2476,19 +2946,23 @@ mod tests {
 
     #[test]
     fn display_ffi_reports_size_and_keeps_writes_when_buffer_is_too_small() {
-        // Arrange
-        let e = kb_emu_new();
-        let needed = kb_emu_display(e, 0, 0, std::ptr::null_mut(), 0);
-        let mut buf = vec![0u8; needed];
+        // SAFETY: the emulator pointers are null or to this test's live `Emu`,
+        // and every buffer is valid for the length passed with it.
+        unsafe {
+            // Arrange
+            let e = kb_emu_new();
+            let needed = kb_emu_display(e, 0, 0, std::ptr::null_mut(), 0);
+            let mut buf = vec![0u8; needed];
 
-        // Act
-        let written = kb_emu_display(e, 0, 0, buf.as_mut_ptr(), buf.len());
+            // Act
+            let written = kb_emu_display(e, 0, 0, buf.as_mut_ptr(), buf.len());
 
-        // Assert
-        assert_eq!(written, needed);
-        let first_len = u16::from_le_bytes([buf[0], buf[1]]) as usize;
-        assert_eq!(first_len, ssd1306::INIT[0].len());
-        kb_emu_free(e);
+            // Assert
+            assert_eq!(written, needed);
+            let first_len = u16::from_le_bytes([buf[0], buf[1]]) as usize;
+            assert_eq!(first_len, ssd1306::INIT[0].len());
+            kb_emu_free(e);
+        }
     }
 
     // ---- pairing with a code ------------------------------------------------------
@@ -2672,36 +3146,46 @@ mod tests {
     }
 
     fn studio_lines(e: &mut Emu, now: u32) -> Vec<String> {
-        let mut lines = Vec::new();
-        let mut buf = vec![0u8; kb_emu_studio_line_max() as usize];
-        loop {
-            let n = kb_emu_studio_next_line(e, now, buf.as_mut_ptr(), buf.len());
-            if n == 0 {
-                return lines;
+        // SAFETY: `e` is a live `&mut Emu`; every buffer is valid for the
+        // length passed with it.
+        unsafe {
+            let mut lines = Vec::new();
+            let mut buf = vec![0u8; kb_emu_studio_line_max() as usize];
+            loop {
+                let n = kb_emu_studio_next_line(e, now, buf.as_mut_ptr(), buf.len());
+                if n == 0 {
+                    return lines;
+                }
+                lines.push(String::from_utf8_lossy(&buf[..n]).trim_end().to_string());
             }
-            lines.push(String::from_utf8_lossy(&buf[..n]).trim_end().to_string());
         }
     }
 
     fn set(e: &mut Emu, layer: u8, pos: u8, enc: &str, now: u32) -> i32 {
-        kb_emu_studio_set(e, layer, pos, enc.as_ptr(), enc.len(), now)
+        // SAFETY: `e` is a live `&mut Emu`; every buffer is valid for the
+        // length passed with it.
+        unsafe { kb_emu_studio_set(e, layer, pos, enc.as_ptr(), enc.len(), now) }
     }
 
     #[test]
     fn studio_unlock_key_unlocks_studio() {
-        // Arrange
-        let mut e = Emu::new();
+        // SAFETY: the emulator pointers are null or to this test's live `Emu`,
+        // and every buffer is valid for the length passed with it.
+        unsafe {
+            // Arrange
+            let mut e = Emu::new();
 
-        // Act
-        press_studio_unlock(&mut e, 0);
+            // Act
+            press_studio_unlock(&mut e, 0);
 
-        // Assert
-        let remaining = kb_emu_studio_unlock_remaining_ms(&raw mut e, 100);
-        assert!(
-            remaining > kb_core::studio::UNLOCK_IDLE_MS - 1000,
-            "{remaining}"
-        );
-        assert!(e.status().studio_unlocked);
+            // Assert
+            let remaining = kb_emu_studio_unlock_remaining_ms(&raw mut e, 100);
+            assert!(
+                remaining > kb_core::studio::UNLOCK_IDLE_MS - 1000,
+                "{remaining}"
+            );
+            assert!(e.status().studio_unlocked);
+        }
     }
 
     #[test]
@@ -2739,17 +3223,21 @@ mod tests {
 
     #[test]
     fn studio_edit_changes_the_label() {
-        // Arrange
-        let mut e = Emu::new();
-        press_studio_unlock(&mut e, 0);
-        set(&mut e, 0, 1, "mt:LCTRL/ESC", 100);
+        // SAFETY: the emulator pointers are null or to this test's live `Emu`,
+        // and every buffer is valid for the length passed with it.
+        unsafe {
+            // Arrange
+            let mut e = Emu::new();
+            press_studio_unlock(&mut e, 0);
+            set(&mut e, 0, 1, "mt:LCTRL/ESC", 100);
 
-        // Act
-        let mut buf = [0u8; 64];
-        let n = kb_emu_label(&raw mut e, 1, buf.as_mut_ptr(), buf.len());
+            // Act
+            let mut buf = [0u8; 64];
+            let n = kb_emu_label(&raw mut e, 1, buf.as_mut_ptr(), buf.len());
 
-        // Assert
-        assert_eq!(std::str::from_utf8(&buf[..n]).unwrap(), "Esc\nCtrl");
+            // Assert
+            assert_eq!(std::str::from_utf8(&buf[..n]).unwrap(), "Esc\nCtrl");
+        }
     }
 
     #[test]
@@ -2767,100 +3255,124 @@ mod tests {
 
     #[test]
     fn studio_saved_edit_survives_an_emulated_restart() {
-        // Arrange
-        let mut e = Emu::new();
-        press_studio_unlock(&mut e, 0);
-        set(&mut e, 0, 1, "kp:Z", 100);
-        assert_eq!(kb_emu_studio_save(&raw mut e, 100), 0);
-        set(&mut e, 0, 2, "kp:Z", 100);
+        // SAFETY: the emulator pointers are null or to this test's live `Emu`,
+        // and every buffer is valid for the length passed with it.
+        unsafe {
+            // Arrange
+            let mut e = Emu::new();
+            press_studio_unlock(&mut e, 0);
+            set(&mut e, 0, 1, "kp:Z", 100);
+            assert_eq!(kb_emu_studio_save(&raw mut e, 100), 0);
+            set(&mut e, 0, 2, "kp:Z", 100);
 
-        // Act
-        kb_emu_reset_half(&raw mut e, 0, 200);
+            // Act
+            kb_emu_reset_half(&raw mut e, 0, 200);
 
-        // Assert: saved stays, unsaved is gone, locked again
-        assert_eq!((e.label(1).as_str(), e.label(2).as_str()), ("Z", "W"));
-        assert_eq!(kb_emu_studio_unlock_remaining_ms(&raw mut e, 200), 0);
+            // Assert: saved stays, unsaved is gone, locked again
+            assert_eq!((e.label(1).as_str(), e.label(2).as_str()), ("Z", "W"));
+            assert_eq!(kb_emu_studio_unlock_remaining_ms(&raw mut e, 200), 0);
+        }
     }
 
     #[test]
     fn studio_protocol_works_through_the_c_abi() {
-        // Arrange
-        let mut e = Emu::new();
-        press_studio_unlock(&mut e, 0);
-        let line = "#studio set 0 1 kp:lc(z)";
-        kb_emu_studio_command(&raw mut e, line.as_ptr(), line.len(), 100);
+        // SAFETY: the emulator pointers are null or to this test's live `Emu`,
+        // and every buffer is valid for the length passed with it.
+        unsafe {
+            // Arrange
+            let mut e = Emu::new();
+            press_studio_unlock(&mut e, 0);
+            let line = "#studio set 0 1 kp:lc(z)";
+            kb_emu_studio_command(&raw mut e, line.as_ptr(), line.len(), 100);
 
-        // Act
-        let lines = studio_lines(&mut e, 100);
+            // Act
+            let lines = studio_lines(&mut e, 100);
 
-        // Assert
-        assert_eq!(lines, ["#A set 0 1 ok kp:LC(Z)", "#U unlocked 300", "#D 1"]);
+            // Assert
+            assert_eq!(lines, ["#A set 0 1 ok kp:LC(Z)", "#U unlocked 300", "#D 1"]);
+        }
     }
 
     #[test]
     fn studio_line_too_long_for_the_buffer_is_kept() {
-        // Arrange
-        let mut e = Emu::new();
-        let line = "#studio get";
-        kb_emu_studio_command(&raw mut e, line.as_ptr(), line.len(), 0);
-        let mut small = [0u8; 4];
-        let needed = kb_emu_studio_next_line(&raw mut e, 0, small.as_mut_ptr(), small.len());
+        // SAFETY: the emulator pointers are null or to this test's live `Emu`,
+        // and every buffer is valid for the length passed with it.
+        unsafe {
+            // Arrange
+            let mut e = Emu::new();
+            let line = "#studio get";
+            kb_emu_studio_command(&raw mut e, line.as_ptr(), line.len(), 0);
+            let mut small = [0u8; 4];
+            let needed = kb_emu_studio_next_line(&raw mut e, 0, small.as_mut_ptr(), small.len());
 
-        // Act
-        let mut big = vec![0u8; needed];
-        let got = kb_emu_studio_next_line(&raw mut e, 0, big.as_mut_ptr(), big.len());
+            // Act
+            let mut big = vec![0u8; needed];
+            let got = kb_emu_studio_next_line(&raw mut e, 0, big.as_mut_ptr(), big.len());
 
-        // Assert
-        assert_eq!(got, needed);
-        assert!(big.starts_with(b"#V 2 "));
+            // Assert
+            assert_eq!(got, needed);
+            assert!(big.starts_with(b"#V 2 "));
+        }
     }
 
     #[test]
     fn studio_canonical_and_label_of_an_encoding() {
-        // Arrange
-        let enc = "MT:lalt/tab";
-        let mut buf = [0u8; 64];
+        // SAFETY: the emulator pointers are null or to this test's live `Emu`,
+        // and every buffer is valid for the length passed with it.
+        unsafe {
+            // Arrange
+            let enc = "MT:lalt/tab";
+            let mut buf = [0u8; 64];
 
-        // Act
-        let n = kb_emu_studio_canonical(enc.as_ptr(), enc.len(), buf.as_mut_ptr(), buf.len());
-        let canonical = String::from_utf8_lossy(&buf[..n as usize]).into_owned();
-        let m = kb_emu_studio_label(enc.as_ptr(), enc.len(), buf.as_mut_ptr(), buf.len());
+            // Act
+            let n = kb_emu_studio_canonical(enc.as_ptr(), enc.len(), buf.as_mut_ptr(), buf.len());
+            let canonical = String::from_utf8_lossy(&buf[..n as usize]).into_owned();
+            let m = kb_emu_studio_label(enc.as_ptr(), enc.len(), buf.as_mut_ptr(), buf.len());
 
-        // Assert
-        assert_eq!(canonical, "mt:LALT/TAB");
-        assert_eq!(std::str::from_utf8(&buf[..m]).unwrap(), "Tab\nAlt");
+            // Assert
+            assert_eq!(canonical, "mt:LALT/TAB");
+            assert_eq!(std::str::from_utf8(&buf[..m]).unwrap(), "Tab\nAlt");
+        }
     }
 
     #[test]
     fn studio_invalid_encoding_has_no_canonical_form() {
-        // Arrange
-        let enc = "kp:NOPE";
+        // SAFETY: the emulator pointers are null or to this test's live `Emu`,
+        // and every buffer is valid for the length passed with it.
+        unsafe {
+            // Arrange
+            let enc = "kp:NOPE";
 
-        // Act
-        let n = kb_emu_studio_canonical(enc.as_ptr(), enc.len(), std::ptr::null_mut(), 0);
+            // Act
+            let n = kb_emu_studio_canonical(enc.as_ptr(), enc.len(), std::ptr::null_mut(), 0);
 
-        // Assert
-        assert_eq!(n, -1);
+            // Assert
+            assert_eq!(n, -1);
+        }
     }
 
     #[test]
     fn studio_key_names_end_with_the_aliases() {
-        // Arrange
-        let mut buf = [0u8; 16];
-        let mut names = Vec::new();
+        // SAFETY: the emulator pointers are null or to this test's live `Emu`,
+        // and every buffer is valid for the length passed with it.
+        unsafe {
+            // Arrange
+            let mut buf = [0u8; 16];
+            let mut names = Vec::new();
 
-        // Act
-        for i in 0.. {
-            let n = kb_emu_studio_key_name(i, buf.as_mut_ptr(), buf.len());
-            if n == 0 {
-                break;
+            // Act
+            for i in 0.. {
+                let n = kb_emu_studio_key_name(i, buf.as_mut_ptr(), buf.len());
+                if n == 0 {
+                    break;
+                }
+                names.push(String::from_utf8_lossy(&buf[..n]).into_owned());
             }
-            names.push(String::from_utf8_lossy(&buf[..n]).into_owned());
-        }
 
-        // Assert
-        assert_eq!(names.first().map(String::as_str), Some("A"));
-        assert_eq!(names.last().map(String::as_str), Some("MEH"));
+            // Assert
+            assert_eq!(names.first().map(String::as_str), Some("A"));
+            assert_eq!(names.last().map(String::as_str), Some("MEH"));
+        }
     }
 
     fn text_of(mut f: impl FnMut(*mut u8, usize) -> usize) -> String {
@@ -2886,145 +3398,181 @@ mod tests {
 
     #[test]
     fn studio_binding_is_the_raw_encoding() {
-        // Arrange
-        let mut e = Emu::new();
+        // SAFETY: the emulator pointers are null or to this test's live `Emu`,
+        // and every buffer is valid for the length passed with it.
+        unsafe {
+            // Arrange
+            let mut e = Emu::new();
 
-        // Act
-        let got = [
-            text_of(|b, c| kb_emu_studio_binding(&raw mut e, 0, 12, b, c)),
-            text_of(|b, c| kb_emu_studio_binding(&raw mut e, 1, 12, b, c)),
-            text_of(|b, c| kb_emu_studio_binding(&raw mut e, 4, 0, b, c)),
-        ];
+            // Act
+            let got = [
+                text_of(|b, c| kb_emu_studio_binding(&raw mut e, 0, 12, b, c)),
+                text_of(|b, c| kb_emu_studio_binding(&raw mut e, 1, 12, b, c)),
+                text_of(|b, c| kb_emu_studio_binding(&raw mut e, 4, 0, b, c)),
+            ];
 
-        // Assert
-        assert_eq!(got, ["mt:LALT/TAB", "trans", ""]);
+            // Assert
+            assert_eq!(got, ["mt:LALT/TAB", "trans", ""]);
+        }
     }
 
     #[test]
     fn studio_default_binding_stays_compiled() {
-        // Arrange
-        let mut e = unlocked_emu();
-        set(&mut e, 0, 1, "kp:Z", 100);
+        // SAFETY: the emulator pointers are null or to this test's live `Emu`,
+        // and every buffer is valid for the length passed with it.
+        unsafe {
+            // Arrange
+            let mut e = unlocked_emu();
+            set(&mut e, 0, 1, "kp:Z", 100);
 
-        // Act
-        let got = [
-            text_of(|b, c| kb_emu_studio_default_binding(&raw mut e, 0, 1, b, c)),
-            text_of(|b, c| kb_emu_studio_binding(&raw mut e, 0, 1, b, c)),
-        ];
+            // Act
+            let got = [
+                text_of(|b, c| kb_emu_studio_default_binding(&raw mut e, 0, 1, b, c)),
+                text_of(|b, c| kb_emu_studio_binding(&raw mut e, 0, 1, b, c)),
+            ];
 
-        // Assert
-        assert_eq!(got, ["kp:Q", "kp:Z"]);
+            // Assert
+            assert_eq!(got, ["kp:Q", "kp:Z"]);
+        }
     }
 
     #[test]
     fn studio_layer_lists_every_position() {
-        // Arrange
-        let mut e = Emu::new();
+        // SAFETY: the emulator pointers are null or to this test's live `Emu`,
+        // and every buffer is valid for the length passed with it.
+        unsafe {
+            // Arrange
+            let mut e = Emu::new();
 
-        // Act
-        let layer = text_of(|b, c| kb_emu_studio_layer(&raw mut e, 2, b, c));
+            // Act
+            let layer = text_of(|b, c| kb_emu_studio_layer(&raw mut e, 2, b, c));
 
-        // Assert
-        let words: Vec<_> = layer.split(' ').collect();
-        assert_eq!(words.len(), 42);
-        assert_eq!(words[35], "sys:StudioUnlock");
-        assert_eq!(text_of(|b, c| kb_emu_studio_layer(&raw mut e, 4, b, c)), "");
+            // Assert
+            let words: Vec<_> = layer.split(' ').collect();
+            assert_eq!(words.len(), 42);
+            assert_eq!(words[35], "sys:StudioUnlock");
+            assert_eq!(text_of(|b, c| kb_emu_studio_layer(&raw mut e, 4, b, c)), "");
+        }
     }
 
     #[test]
     fn studio_check_works_locked_and_changes_nothing() {
-        // Arrange
-        let mut e = Emu::new();
-        let (ok, bad) = ("kp:Z", "trans");
+        // SAFETY: the emulator pointers are null or to this test's live `Emu`,
+        // and every buffer is valid for the length passed with it.
+        unsafe {
+            // Arrange
+            let mut e = Emu::new();
+            let (ok, bad) = ("kp:Z", "trans");
 
-        // Act
-        let codes = [
-            kb_emu_studio_check(&raw mut e, 0, 1, ok.as_ptr(), ok.len()),
-            kb_emu_studio_check(&raw mut e, 2, 35, bad.as_ptr(), bad.len()),
-        ];
+            // Act
+            let codes = [
+                kb_emu_studio_check(&raw mut e, 0, 1, ok.as_ptr(), ok.len()),
+                kb_emu_studio_check(&raw mut e, 2, 35, bad.as_ptr(), bad.len()),
+            ];
 
-        // Assert
-        assert_eq!(codes, [0, 5]);
-        assert_eq!(e.label(1), "Q");
+            // Assert
+            assert_eq!(codes, [0, 5]);
+            assert_eq!(e.label(1), "Q");
+        }
     }
 
     #[test]
     fn studio_result_codes_for_bad_input() {
-        // Arrange
-        let mut e = unlocked_emu();
+        // SAFETY: the emulator pointers are null or to this test's live `Emu`,
+        // and every buffer is valid for the length passed with it.
+        unsafe {
+            // Arrange
+            let mut e = unlocked_emu();
 
-        // Act
-        let codes = [
-            set(&mut e, 9, 0, "kp:A", 100),
-            set(&mut e, 0, 0, "kp:NOPE", 100),
-            set(
-                &mut e,
-                0,
-                0,
-                "kp:LC(LS(LA(LG(RC(RS(RA(RG(PAUSE_BREAK))))))))",
-                100,
-            ),
-            kb_emu_studio_set(&raw mut e, 0, 0, [0xFFu8].as_ptr(), 1, 100),
-            kb_emu_studio_set(std::ptr::null_mut(), 0, 0, std::ptr::null(), 0, 100),
-        ];
+            // Act
+            let codes = [
+                set(&mut e, 9, 0, "kp:A", 100),
+                set(&mut e, 0, 0, "kp:NOPE", 100),
+                set(
+                    &mut e,
+                    0,
+                    0,
+                    "kp:LC(LS(LA(LG(RC(RS(RA(RG(PAUSE_BREAK))))))))",
+                    100,
+                ),
+                kb_emu_studio_set(&raw mut e, 0, 0, [0xFFu8].as_ptr(), 1, 100),
+                kb_emu_studio_set(std::ptr::null_mut(), 0, 0, std::ptr::null(), 0, 100),
+            ];
 
-        // Assert
-        assert_eq!(codes, [2, 3, 4, -1, -1]);
+            // Assert
+            assert_eq!(codes, [2, 3, 4, -1, -1]);
+        }
     }
 
     #[test]
     fn studio_revert_drops_the_edit() {
-        // Arrange
-        let mut e = unlocked_emu();
-        set(&mut e, 0, 1, "kp:Z", 100);
+        // SAFETY: the emulator pointers are null or to this test's live `Emu`,
+        // and every buffer is valid for the length passed with it.
+        unsafe {
+            // Arrange
+            let mut e = unlocked_emu();
+            set(&mut e, 0, 1, "kp:Z", 100);
 
-        // Act
-        let code = kb_emu_studio_revert(&raw mut e);
+            // Act
+            let code = kb_emu_studio_revert(&raw mut e);
 
-        // Assert
-        assert_eq!(code, 0);
-        assert_eq!(e.label(1), "Q");
-        assert!(!kb_emu_studio_dirty(&raw mut e));
+            // Assert
+            assert_eq!(code, 0);
+            assert_eq!(e.label(1), "Q");
+            assert!(!kb_emu_studio_dirty(&raw mut e));
+        }
     }
 
     #[test]
     fn studio_reset_needs_the_unlock() {
-        // Arrange
-        let mut e = Emu::new();
+        // SAFETY: the emulator pointers are null or to this test's live `Emu`,
+        // and every buffer is valid for the length passed with it.
+        unsafe {
+            // Arrange
+            let mut e = Emu::new();
 
-        // Act
-        let code = kb_emu_studio_reset(&raw mut e, 0);
+            // Act
+            let code = kb_emu_studio_reset(&raw mut e, 0);
 
-        // Assert
-        assert_eq!(code, 1);
+            // Assert
+            assert_eq!(code, 1);
+        }
     }
 
     #[test]
     fn studio_reset_back_to_compiled() {
-        // Arrange
-        let mut e = unlocked_emu();
-        set(&mut e, 0, 1, "kp:Z", 100);
-        kb_emu_studio_save(&raw mut e, 100);
+        // SAFETY: the emulator pointers are null or to this test's live `Emu`,
+        // and every buffer is valid for the length passed with it.
+        unsafe {
+            // Arrange
+            let mut e = unlocked_emu();
+            set(&mut e, 0, 1, "kp:Z", 100);
+            kb_emu_studio_save(&raw mut e, 100);
 
-        // Act
-        let code = kb_emu_studio_reset(&raw mut e, 100);
+            // Act
+            let code = kb_emu_studio_reset(&raw mut e, 100);
 
-        // Assert
-        assert_eq!(code, 0);
-        assert_eq!(e.label(1), "Q");
+            // Assert
+            assert_eq!(code, 0);
+            assert_eq!(e.label(1), "Q");
+        }
     }
 
     #[test]
     fn studio_lock_locks_and_shows_it() {
-        // Arrange
-        let mut e = unlocked_emu();
+        // SAFETY: the emulator pointers are null or to this test's live `Emu`,
+        // and every buffer is valid for the length passed with it.
+        unsafe {
+            // Arrange
+            let mut e = unlocked_emu();
 
-        // Act
-        kb_emu_studio_lock(&raw mut e, 100);
+            // Act
+            kb_emu_studio_lock(&raw mut e, 100);
 
-        // Assert
-        assert_eq!(kb_emu_studio_unlock_remaining_ms(&raw mut e, 100), 0);
-        assert!(!e.status().studio_unlocked);
+            // Assert
+            assert_eq!(kb_emu_studio_unlock_remaining_ms(&raw mut e, 100), 0);
+            assert!(!e.status().studio_unlocked);
+        }
     }
 
     #[test]
@@ -3041,88 +3589,112 @@ mod tests {
 
     #[test]
     fn studio_dirty_follows_edits_and_saves() {
-        // Arrange
-        let mut e = unlocked_emu();
-        set(&mut e, 0, 1, "kp:Z", 100);
-        let before = kb_emu_studio_dirty(&raw mut e);
+        // SAFETY: the emulator pointers are null or to this test's live `Emu`,
+        // and every buffer is valid for the length passed with it.
+        unsafe {
+            // Arrange
+            let mut e = unlocked_emu();
+            set(&mut e, 0, 1, "kp:Z", 100);
+            let before = kb_emu_studio_dirty(&raw mut e);
 
-        // Act
-        kb_emu_studio_save(&raw mut e, 100);
+            // Act
+            kb_emu_studio_save(&raw mut e, 100);
 
-        // Assert
-        assert!(before);
-        assert!(!kb_emu_studio_dirty(&raw mut e));
+            // Assert
+            assert!(before);
+            assert!(!kb_emu_studio_dirty(&raw mut e));
+        }
     }
 
     #[test]
     fn studio_generation_changes_with_an_edit() {
-        // Arrange
-        let mut e = unlocked_emu();
-        let before = kb_emu_studio_generation(&raw mut e);
+        // SAFETY: the emulator pointers are null or to this test's live `Emu`,
+        // and every buffer is valid for the length passed with it.
+        unsafe {
+            // Arrange
+            let mut e = unlocked_emu();
+            let before = kb_emu_studio_generation(&raw mut e);
 
-        // Act
-        set(&mut e, 0, 1, "kp:Z", 100);
+            // Act
+            set(&mut e, 0, 1, "kp:Z", 100);
 
-        // Assert
-        assert_ne!(kb_emu_studio_generation(&raw mut e), before);
+            // Assert
+            assert_ne!(kb_emu_studio_generation(&raw mut e), before);
+        }
     }
 
     #[test]
     fn studio_storage_path_reads_the_file() {
-        // Arrange
-        let dir = std::env::temp_dir().join(format!("kb-emu-abi-{}", std::process::id()));
-        std::fs::create_dir_all(&dir).unwrap();
-        let path = dir.join("keymap.txt");
-        std::fs::write(&path, "emk-keymap 2\n0 1 kp:Z\n").unwrap();
-        let path = path.to_str().unwrap().to_string();
-        let mut e = Emu::new();
+        // SAFETY: the emulator pointers are null or to this test's live `Emu`,
+        // and every buffer is valid for the length passed with it.
+        unsafe {
+            // Arrange
+            let dir = std::env::temp_dir().join(format!("kb-emu-abi-{}", std::process::id()));
+            std::fs::create_dir_all(&dir).unwrap();
+            let path = dir.join("keymap.txt");
+            std::fs::write(&path, "emk-keymap 2\n0 1 kp:Z\n").unwrap();
+            let path = path.to_str().unwrap().to_string();
+            let mut e = Emu::new();
 
-        // Act
-        let code = kb_emu_studio_set_storage_path(&raw mut e, path.as_ptr(), path.len());
+            // Act
+            let code = kb_emu_studio_set_storage_path(&raw mut e, path.as_ptr(), path.len());
 
-        // Assert
-        assert_eq!(code, 0);
-        assert_eq!(e.label(1), "Z");
-        let _ = std::fs::remove_dir_all(dir);
+            // Assert
+            assert_eq!(code, 0);
+            assert_eq!(e.label(1), "Z");
+            let _ = std::fs::remove_dir_all(dir);
+        }
     }
 
     #[test]
     fn studio_storage_path_empty_means_memory() {
-        // Arrange
-        let mut e = Emu::new();
+        // SAFETY: the emulator pointers are null or to this test's live `Emu`,
+        // and every buffer is valid for the length passed with it.
+        unsafe {
+            // Arrange
+            let mut e = Emu::new();
 
-        // Act
-        let code = kb_emu_studio_set_storage_path(&raw mut e, std::ptr::null(), 0);
+            // Act
+            let code = kb_emu_studio_set_storage_path(&raw mut e, std::ptr::null(), 0);
 
-        // Assert
-        assert_eq!(code, 0);
+            // Assert
+            assert_eq!(code, 0);
+        }
     }
 
     #[test]
     fn studio_system_names_are_the_sys_names() {
-        // Arrange / Act
-        let names: Vec<_> = (0..8)
-            .map(|i| text_of(|b, c| kb_emu_studio_system_name(i, b, c)))
-            .collect();
+        // SAFETY: the emulator pointers are null or to this test's live `Emu`,
+        // and every buffer is valid for the length passed with it.
+        unsafe {
+            // Arrange / Act
+            let names: Vec<_> = (0..8)
+                .map(|i| text_of(|b, c| kb_emu_studio_system_name(i, b, c)))
+                .collect();
 
-        // Assert
-        assert_eq!(names[0], "BtPrev");
-        assert_eq!(names[4], "StudioUnlock");
-        assert_eq!(names[7], "");
+            // Assert
+            assert_eq!(names[0], "BtPrev");
+            assert_eq!(names[4], "StudioUnlock");
+            assert_eq!(names[7], "");
+        }
     }
 
     #[test]
     fn studio_command_ignores_other_lines() {
-        // Arrange
-        let mut e = Emu::new();
-        let line = "s";
+        // SAFETY: the emulator pointers are null or to this test's live `Emu`,
+        // and every buffer is valid for the length passed with it.
+        unsafe {
+            // Arrange
+            let mut e = Emu::new();
+            let line = "s";
 
-        // Act
-        let taken = kb_emu_studio_command(&raw mut e, line.as_ptr(), line.len(), 0);
+            // Act
+            let taken = kb_emu_studio_command(&raw mut e, line.as_ptr(), line.len(), 0);
 
-        // Assert
-        assert!(!taken);
-        assert_eq!(studio_lines(&mut e, 0), Vec::<String>::new());
+            // Assert
+            assert!(!taken);
+            assert_eq!(studio_lines(&mut e, 0), Vec::<String>::new());
+        }
     }
 
     #[test]
@@ -3137,7 +3709,9 @@ mod tests {
     // ---- combos ----------------------------------------------------------
 
     fn combo_add(e: &mut Emu, text: &str, now: u32) -> i32 {
-        kb_emu_studio_combo_add(e, text.as_ptr(), text.len(), now)
+        // SAFETY: `e` is a live `&mut Emu`; every buffer is valid for the
+        // length passed with it.
+        unsafe { kb_emu_studio_combo_add(e, text.as_ptr(), text.len(), now) }
     }
 
     #[test]
@@ -3151,23 +3725,27 @@ mod tests {
 
     #[test]
     fn studio_combos_start_compiled() {
-        // Arrange
-        let mut e = Emu::new();
+        // SAFETY: the emulator pointers are null or to this test's live `Emu`,
+        // and every buffer is valid for the length passed with it.
+        unsafe {
+            // Arrange
+            let mut e = Emu::new();
 
-        // Act
-        let (count, first, default_count, default_last) = (
-            kb_emu_studio_combo_count(&raw mut e),
-            text_of(|b, c| kb_emu_studio_combo(&raw mut e, 0, b, c)),
-            kb_emu_studio_default_combo_count(&raw mut e),
-            text_of(|b, c| kb_emu_studio_default_combo(&raw mut e, 5, b, c)),
-        );
+            // Act
+            let (count, first, default_count, default_last) = (
+                kb_emu_studio_combo_count(&raw mut e),
+                text_of(|b, c| kb_emu_studio_combo(&raw mut e, 0, b, c)),
+                kb_emu_studio_default_combo_count(&raw mut e),
+                text_of(|b, c| kb_emu_studio_default_combo(&raw mut e, 5, b, c)),
+            );
 
-        // Assert
-        assert_eq!(count, 6);
-        assert_eq!(first, "cut 25,26 0 50 150 kp:LC(X)");
-        assert_eq!(default_count, 6);
-        assert_eq!(default_last, "reset_bluetooth 25,26 2 50 0 sys:BtClear");
-        assert_eq!(text_of(|b, c| kb_emu_studio_combo(&raw mut e, 6, b, c)), "");
+            // Assert
+            assert_eq!(count, 6);
+            assert_eq!(first, "cut 25,26 0 50 150 kp:LC(X)");
+            assert_eq!(default_count, 6);
+            assert_eq!(default_last, "reset_bluetooth 25,26 2 50 0 sys:BtClear");
+            assert_eq!(text_of(|b, c| kb_emu_studio_combo(&raw mut e, 6, b, c)), "");
+        }
     }
 
     #[test]
@@ -3184,54 +3762,66 @@ mod tests {
 
     #[test]
     fn studio_added_combo_types() {
-        // Arrange: Q + W together type A
-        let mut e = unlocked_emu();
-        assert_eq!(combo_add(&mut e, "qw 1,2 0 50 0 kp:A", 100), 0);
+        // SAFETY: the emulator pointers are null or to this test's live `Emu`,
+        // and every buffer is valid for the length passed with it.
+        unsafe {
+            // Arrange: Q + W together type A
+            let mut e = unlocked_emu();
+            assert_eq!(combo_add(&mut e, "qw 1,2 0 50 0 kp:A", 100), 0);
 
-        // Act
-        e.press(1, 300);
-        e.press(2, 310);
+            // Act
+            e.press(1, 300);
+            e.press(2, 310);
 
-        // Assert
-        let mut typed = Vec::new();
-        while let Some(event) = e.poll(310) {
-            if let Event::Output(Output::Report(r)) = event {
-                typed.extend(r.keys());
+            // Assert
+            let mut typed = Vec::new();
+            while let Some(event) = e.poll(310) {
+                if let Event::Output(Output::Report(r)) = event {
+                    typed.extend(r.keys());
+                }
             }
+            assert_eq!(typed, [keys::A.code]);
+            assert_eq!(kb_emu_studio_combo_count(&raw mut e), 7);
         }
-        assert_eq!(typed, [keys::A.code]);
-        assert_eq!(kb_emu_studio_combo_count(&raw mut e), 7);
     }
 
     #[test]
     fn studio_combo_set_changes_it() {
-        // Arrange
-        let mut e = unlocked_emu();
-        let text = "cut 25,26 0 80 150 kp:LC(X)";
+        // SAFETY: the emulator pointers are null or to this test's live `Emu`,
+        // and every buffer is valid for the length passed with it.
+        unsafe {
+            // Arrange
+            let mut e = unlocked_emu();
+            let text = "cut 25,26 0 80 150 kp:LC(X)";
 
-        // Act
-        let code = kb_emu_studio_combo_set(&raw mut e, 0, text.as_ptr(), text.len(), 100);
+            // Act
+            let code = kb_emu_studio_combo_set(&raw mut e, 0, text.as_ptr(), text.len(), 100);
 
-        // Assert
-        assert_eq!(code, 0);
-        assert_eq!(
-            text_of(|b, c| kb_emu_studio_combo(&raw mut e, 0, b, c)),
-            text
-        );
+            // Assert
+            assert_eq!(code, 0);
+            assert_eq!(
+                text_of(|b, c| kb_emu_studio_combo(&raw mut e, 0, b, c)),
+                text
+            );
+        }
     }
 
     #[test]
     fn studio_combo_remove_drops_it() {
-        // Arrange
-        let mut e = unlocked_emu();
+        // SAFETY: the emulator pointers are null or to this test's live `Emu`,
+        // and every buffer is valid for the length passed with it.
+        unsafe {
+            // Arrange
+            let mut e = unlocked_emu();
 
-        // Act
-        let code = kb_emu_studio_combo_remove(&raw mut e, 0, 100);
+            // Act
+            let code = kb_emu_studio_combo_remove(&raw mut e, 0, 100);
 
-        // Assert
-        assert_eq!(code, 0);
-        assert_eq!(kb_emu_studio_combo_count(&raw mut e), 5);
-        assert_eq!(kb_emu_studio_combo_remove(&raw mut e, 9, 100), 2);
+            // Assert
+            assert_eq!(code, 0);
+            assert_eq!(kb_emu_studio_combo_count(&raw mut e), 5);
+            assert_eq!(kb_emu_studio_combo_remove(&raw mut e, 9, 100), 2);
+        }
     }
 
     #[test]
@@ -3272,36 +3862,44 @@ mod tests {
 
     #[test]
     fn studio_combo_check_new_and_existing() {
-        // Arrange
-        let mut e = Emu::new();
-        let (good, bad) = ("x 1,2 * 40 0 kp:A", "x 1,2 * 40 0 mo:9");
+        // SAFETY: the emulator pointers are null or to this test's live `Emu`,
+        // and every buffer is valid for the length passed with it.
+        unsafe {
+            // Arrange
+            let mut e = Emu::new();
+            let (good, bad) = ("x 1,2 * 40 0 kp:A", "x 1,2 * 40 0 mo:9");
 
-        // Act
-        let codes = [
-            kb_emu_studio_combo_check(&raw mut e, 255, good.as_ptr(), good.len()),
-            kb_emu_studio_combo_check(&raw mut e, 0, good.as_ptr(), good.len()),
-            kb_emu_studio_combo_check(&raw mut e, 9, good.as_ptr(), good.len()),
-            kb_emu_studio_combo_check(&raw mut e, 255, bad.as_ptr(), bad.len()),
-        ];
+            // Act
+            let codes = [
+                kb_emu_studio_combo_check(&raw mut e, 255, good.as_ptr(), good.len()),
+                kb_emu_studio_combo_check(&raw mut e, 0, good.as_ptr(), good.len()),
+                kb_emu_studio_combo_check(&raw mut e, 9, good.as_ptr(), good.len()),
+                kb_emu_studio_combo_check(&raw mut e, 255, bad.as_ptr(), bad.len()),
+            ];
 
-        // Assert
-        assert_eq!(codes, [0, 0, 2, 3]);
-        assert_eq!(kb_emu_studio_combo_count(&raw mut e), 6);
+            // Assert
+            assert_eq!(codes, [0, 0, 2, 3]);
+            assert_eq!(kb_emu_studio_combo_count(&raw mut e), 6);
+        }
     }
 
     #[test]
     fn studio_combo_check_remove() {
-        // Arrange
-        let mut e = Emu::new();
+        // SAFETY: the emulator pointers are null or to this test's live `Emu`,
+        // and every buffer is valid for the length passed with it.
+        unsafe {
+            // Arrange
+            let mut e = Emu::new();
 
-        // Act
-        let codes = [
-            kb_emu_studio_combo_check_remove(&raw mut e, 0),
-            kb_emu_studio_combo_check_remove(&raw mut e, 6),
-        ];
+            // Act
+            let codes = [
+                kb_emu_studio_combo_check_remove(&raw mut e, 0),
+                kb_emu_studio_combo_check_remove(&raw mut e, 6),
+            ];
 
-        // Assert
-        assert_eq!(codes, [0, 2]);
+            // Assert
+            assert_eq!(codes, [0, 2]);
+        }
     }
 
     #[test]
@@ -3328,31 +3926,39 @@ mod tests {
 
     #[test]
     fn studio_saved_combo_survives_an_emulated_restart() {
-        // Arrange
-        let mut e = unlocked_emu();
-        kb_emu_studio_combo_remove(&raw mut e, 0, 100);
-        kb_emu_studio_save(&raw mut e, 100);
+        // SAFETY: the emulator pointers are null or to this test's live `Emu`,
+        // and every buffer is valid for the length passed with it.
+        unsafe {
+            // Arrange
+            let mut e = unlocked_emu();
+            kb_emu_studio_combo_remove(&raw mut e, 0, 100);
+            kb_emu_studio_save(&raw mut e, 100);
 
-        // Act
-        kb_emu_reset_half(&raw mut e, 0, 200);
+            // Act
+            kb_emu_reset_half(&raw mut e, 0, 200);
 
-        // Assert
-        assert_eq!(kb_emu_studio_combo_count(&raw mut e), 5);
+            // Assert
+            assert_eq!(kb_emu_studio_combo_count(&raw mut e), 5);
+        }
     }
 
     #[test]
     fn studio_protocol_defaults_through_the_c_abi() {
-        // Arrange
-        let mut e = Emu::new();
-        let line = "#studio defaults";
-        kb_emu_studio_command(&raw mut e, line.as_ptr(), line.len(), 0);
+        // SAFETY: the emulator pointers are null or to this test's live `Emu`,
+        // and every buffer is valid for the length passed with it.
+        unsafe {
+            // Arrange
+            let mut e = Emu::new();
+            let line = "#studio defaults";
+            kb_emu_studio_command(&raw mut e, line.as_ptr(), line.len(), 0);
 
-        // Act
-        let lines = studio_lines(&mut e, 0);
+            // Act
+            let lines = studio_lines(&mut e, 0);
 
-        // Assert
-        assert!(lines[0].starts_with("#LD 0 "));
-        assert!(lines.contains(&"#CD end 6".to_string()));
+            // Assert
+            assert!(lines[0].starts_with("#LD 0 "));
+            assert!(lines.contains(&"#CD end 6".to_string()));
+        }
     }
 
     // ---- mouse -------------------------------------------------------------
@@ -3373,18 +3979,22 @@ mod tests {
     }
 
     fn mouse_state(e: &mut Emu) -> KbMouse {
-        let mut out = KbMouse {
-            x: 0,
-            y: 0,
-            wheel: 0,
-            pan: 0,
-            buttons: 0,
-            pointer: 0,
-            moving: 0,
-            hires: 0,
-        };
-        assert!(kb_emu_mouse_state(e, &raw mut out));
-        out
+        // SAFETY: `e` is a live `&mut Emu`; every buffer is valid for the
+        // length passed with it.
+        unsafe {
+            let mut out = KbMouse {
+                x: 0,
+                y: 0,
+                wheel: 0,
+                pan: 0,
+                buttons: 0,
+                pointer: 0,
+                moving: 0,
+                hires: 0,
+            };
+            assert!(kb_emu_mouse_state(e, &raw mut out));
+            out
+        }
     }
 
     #[test]
@@ -3441,44 +4051,52 @@ mod tests {
 
     #[test]
     fn mouse_reports_come_as_kind_7_events() {
-        // Arrange
-        let mut e = Emu::new();
-        e.press(41, 0);
-        drain(&mut e, 0);
-        e.press(15, 10);
+        // SAFETY: the emulator pointers are null or to this test's live `Emu`,
+        // and every buffer is valid for the length passed with it.
+        unsafe {
+            // Arrange
+            let mut e = Emu::new();
+            e.press(41, 0);
+            drain(&mut e, 0);
+            e.press(15, 10);
 
-        // Act
-        let mut ev = KbEvent {
-            kind: 0,
-            value: 0,
-            mods: 0,
-            reserved: 0,
-            keys: [0; 32],
-        };
-        let mut seen = None;
-        while kb_emu_poll(&raw mut e, 10, &raw mut ev) {
-            if ev.kind == 7 {
-                seen = Some(MouseReport::from_bytes(ev.keys[..7].try_into().unwrap()));
+            // Act
+            let mut ev = KbEvent {
+                kind: 0,
+                value: 0,
+                mods: 0,
+                reserved: 0,
+                keys: [0; 32],
+            };
+            let mut seen = None;
+            while kb_emu_poll(&raw mut e, 10, &raw mut ev) {
+                if ev.kind == 7 {
+                    seen = Some(MouseReport::from_bytes(ev.keys[..7].try_into().unwrap()));
+                }
             }
-        }
 
-        // Assert: the nudge, 1 px down
-        assert_eq!(seen.map(|r| (r.x, r.y)), Some((0, 1)));
+            // Assert: the nudge, 1 px down
+            assert_eq!(seen.map(|r| (r.x, r.y)), Some((0, 1)));
+        }
     }
 
     #[test]
     fn moving_mouse_asks_for_a_tick_every_ms() {
-        // Arrange
-        let mut e = Emu::new();
-        e.press(41, 0);
-        e.press(17, 10);
-        mouse_run(&mut e, 10, 20);
+        // SAFETY: the emulator pointers are null or to this test's live `Emu`,
+        // and every buffer is valid for the length passed with it.
+        unsafe {
+            // Arrange
+            let mut e = Emu::new();
+            e.press(41, 0);
+            e.press(17, 10);
+            mouse_run(&mut e, 10, 20);
 
-        // Act
-        let next = kb_emu_next_deadline(&raw mut e);
+            // Act
+            let next = kb_emu_next_deadline(&raw mut e);
 
-        // Assert
-        assert_eq!(next, 21);
+            // Assert
+            assert_eq!(next, 21);
+        }
     }
 
     #[test]
@@ -3593,52 +4211,64 @@ mod tests {
 
     #[test]
     fn hires_scrolling_counts_sixteenths() {
-        // Arrange: mouse mode, hi-res set by the "computer"
-        let mut e = Emu::new();
-        kb_emu_mouse_set_resolution(&raw mut e, true, true);
-        e.press(41, 0);
-        e.press(17, 10);
-        mouse_run(&mut e, 10, 20);
-        e.release(17, 20);
-        mouse_run(&mut e, 20, 30);
-        e.press(4, 30);
+        // SAFETY: the emulator pointers are null or to this test's live `Emu`,
+        // and every buffer is valid for the length passed with it.
+        unsafe {
+            // Arrange: mouse mode, hi-res set by the "computer"
+            let mut e = Emu::new();
+            kb_emu_mouse_set_resolution(&raw mut e, true, true);
+            e.press(41, 0);
+            e.press(17, 10);
+            mouse_run(&mut e, 10, 20);
+            e.release(17, 20);
+            mouse_run(&mut e, 20, 30);
+            e.press(4, 30);
 
-        // Act: a tap
-        mouse_run(&mut e, 30, 100);
+            // Act: a tap
+            mouse_run(&mut e, 30, 100);
 
-        // Assert: one detent of 16
-        let state = mouse_state(&mut e);
-        assert_eq!((state.wheel, state.hires), (16, 0b11));
+            // Assert: one detent of 16
+            let state = mouse_state(&mut e);
+            assert_eq!((state.wheel, state.hires), (16, 0b11));
+        }
     }
 
     #[test]
     fn reset_position_keeps_the_buttons() {
-        // Arrange
-        let mut e = Emu::new();
-        e.press(41, 0);
-        e.press(13, 10);
-        mouse_run(&mut e, 10, 10);
-        e.press(17, 20);
-        mouse_run(&mut e, 20, 200);
+        // SAFETY: the emulator pointers are null or to this test's live `Emu`,
+        // and every buffer is valid for the length passed with it.
+        unsafe {
+            // Arrange
+            let mut e = Emu::new();
+            e.press(41, 0);
+            e.press(13, 10);
+            mouse_run(&mut e, 10, 10);
+            e.press(17, 20);
+            mouse_run(&mut e, 20, 200);
 
-        // Act
-        kb_emu_mouse_reset_position(&raw mut e);
+            // Act
+            kb_emu_mouse_reset_position(&raw mut e);
 
-        // Assert
-        let state = mouse_state(&mut e);
-        assert_eq!((state.x, state.y, state.buttons), (0, 0, 4));
+            // Assert
+            let state = mouse_state(&mut e);
+            assert_eq!((state.x, state.y, state.buttons), (0, 0, 4));
+        }
     }
 
     #[test]
     fn mouse_state_needs_a_place_to_write() {
-        // Arrange
-        let mut e = Emu::new();
+        // SAFETY: the emulator pointers are null or to this test's live `Emu`,
+        // and every buffer is valid for the length passed with it.
+        unsafe {
+            // Arrange
+            let mut e = Emu::new();
 
-        // Act
-        let ok = kb_emu_mouse_state(&raw mut e, std::ptr::null_mut());
+            // Act
+            let ok = kb_emu_mouse_state(&raw mut e, std::ptr::null_mut());
 
-        // Assert
-        assert!(!ok);
+            // Assert
+            assert!(!ok);
+        }
     }
 
     #[test]
@@ -3656,14 +4286,18 @@ mod tests {
 
     #[test]
     fn mouse_action_labels_through_studio() {
-        // Arrange
-        let enc = "ms:right";
-        let mut buf = [0u8; 32];
+        // SAFETY: the emulator pointers are null or to this test's live `Emu`,
+        // and every buffer is valid for the length passed with it.
+        unsafe {
+            // Arrange
+            let enc = "ms:right";
+            let mut buf = [0u8; 32];
 
-        // Act
-        let n = kb_emu_studio_label(enc.as_ptr(), enc.len(), buf.as_mut_ptr(), buf.len());
+            // Act
+            let n = kb_emu_studio_label(enc.as_ptr(), enc.len(), buf.as_mut_ptr(), buf.len());
 
-        // Assert
-        assert_eq!(std::str::from_utf8(&buf[..n]).unwrap(), "scroll →");
+            // Assert
+            assert_eq!(std::str::from_utf8(&buf[..n]).unwrap(), "scroll →");
+        }
     }
 }

@@ -237,8 +237,14 @@ pub fn layer_binding(layer: u8, pos: u8) -> Action {
 
 // ---- C ABI ------------------------------------------------------------------
 
-fn mirror<'a>(m: *mut Mirror) -> Option<&'a mut Mirror> {
-    // SAFETY: the caller passes a pointer from `kb_mirror_new` (or null).
+/// The mirror behind `m`, or `None` for null.
+///
+/// # Safety
+///
+/// `m` is null or a mirror from `kb_mirror_new` that is not freed yet, and
+/// not otherwise borrowed while the reference lives.
+unsafe fn mirror<'a>(m: *mut Mirror) -> Option<&'a mut Mirror> {
+    // SAFETY: null or live and unaliased, as this function requires.
     unsafe { m.as_mut() }
 }
 
@@ -247,8 +253,12 @@ pub extern "C" fn kb_mirror_new() -> *mut Mirror {
     Box::into_raw(Box::new(Mirror::new()))
 }
 
+/// # Safety
+///
+/// `m` is null or a mirror from [`kb_mirror_new`] that is not freed yet; it is
+/// invalid afterwards.
 #[unsafe(no_mangle)]
-pub extern "C" fn kb_mirror_free(m: *mut Mirror) {
+pub unsafe extern "C" fn kb_mirror_free(m: *mut Mirror) {
     if !m.is_null() {
         // SAFETY: from `kb_mirror_new`, freed once.
         drop(unsafe { Box::from_raw(m) });
@@ -256,14 +266,23 @@ pub extern "C" fn kb_mirror_free(m: *mut Mirror) {
 }
 
 /// The status from a `#S` line; `stage` is `stage_len` bytes of UTF-8.
+///
+/// # Safety
+///
+/// `m` is null or a mirror from [`kb_mirror_new`] that is not freed yet;
+/// `status` is null or points to a valid [`MirrorStatus`]; `stage` is null or
+/// points to `stage_len` readable bytes. Nothing is kept past the call.
 #[unsafe(no_mangle)]
-pub extern "C" fn kb_mirror_set_status(
+pub unsafe extern "C" fn kb_mirror_set_status(
     m: *mut Mirror,
     status: *const MirrorStatus,
     stage: *const u8,
     stage_len: usize,
 ) {
-    let Some(m) = mirror(m) else { return };
+    // SAFETY: `m` is null or live, as this function requires.
+    let Some(m) = (unsafe { mirror(m) }) else {
+        return;
+    };
     // SAFETY: the caller passes a valid status (or null, checked here).
     let Some(status) = (unsafe { status.as_ref() }) else {
         return;
@@ -280,24 +299,41 @@ pub extern "C" fn kb_mirror_set_status(
 }
 
 /// The frame from a `#F` line for display `half` (512 bytes), or null: off.
+///
+/// # Safety
+///
+/// `m` is null or a mirror from [`kb_mirror_new`] that is not freed yet;
+/// `frame` is null or points to `FRAME_BYTES` (512) readable bytes. Nothing is
+/// kept past the call.
 #[unsafe(no_mangle)]
-pub extern "C" fn kb_mirror_set_frame(m: *mut Mirror, half: u8, frame: *const u8) {
-    let Some(m) = mirror(m) else { return };
+pub unsafe extern "C" fn kb_mirror_set_frame(m: *mut Mirror, half: u8, frame: *const u8) {
+    // SAFETY: `m` is null or live, as this function requires.
+    let Some(m) = (unsafe { mirror(m) }) else {
+        return;
+    };
     // SAFETY: the caller passes FRAME_BYTES readable bytes (or null).
     let frame = unsafe { frame.cast::<[u8; FRAME_BYTES]>().as_ref() };
     m.set_frame(half as usize, frame);
 }
 
 /// I²C writes for display `half`, framed like `kb_emu_display`.
+///
+/// # Safety
+///
+/// `m` is null or a mirror from [`kb_mirror_new`] that is not freed yet; `buf`
+/// is null or valid for writing `cap` bytes. Nothing is kept past the call.
 #[unsafe(no_mangle)]
-pub extern "C" fn kb_mirror_display(
+pub unsafe extern "C" fn kb_mirror_display(
     m: *mut Mirror,
     half: u8,
     now_ms: u32,
     buf: *mut u8,
     cap: usize,
 ) -> usize {
-    let Some(m) = mirror(m) else { return 0 };
+    // SAFETY: `m` is null or live, as this function requires.
+    let Some(m) = (unsafe { mirror(m) }) else {
+        return 0;
+    };
     let half = (half as usize).min(1);
     let snapshot = (m.shown[half].clone(), m.lit[half], m.idle_at[half]);
     let mut framed = Vec::new();
@@ -310,17 +346,26 @@ pub extern "C" fn kb_mirror_display(
         (m.shown[half], m.lit[half], m.idle_at[half]) = snapshot;
         return framed.len();
     }
-    crate::copy_out(&framed, buf, cap)
+    // SAFETY: `buf` is null or has room for `cap` bytes, as this function requires.
+    unsafe { crate::copy_out(&framed, buf, cap) }
 }
 
 /// Label of key `pos` with `layer` active (as `kb_emu_label`).
+///
+/// # Safety
+///
+/// `buf` is null or valid for writing `cap` bytes. Nothing is kept past the
+/// call.
 #[unsafe(no_mangle)]
-pub extern "C" fn kb_mirror_label(layer: u8, pos: u8, buf: *mut u8, cap: usize) -> usize {
-    crate::copy_out(
-        crate::action_label(layer_binding(layer, pos)).as_bytes(),
-        buf,
-        cap,
-    )
+pub unsafe extern "C" fn kb_mirror_label(layer: u8, pos: u8, buf: *mut u8, cap: usize) -> usize {
+    // SAFETY: `buf` is null or has room for `cap` bytes, as this function requires.
+    unsafe {
+        crate::copy_out(
+            crate::action_label(layer_binding(layer, pos)).as_bytes(),
+            buf,
+            cap,
+        )
+    }
 }
 
 #[cfg(test)]

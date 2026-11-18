@@ -577,46 +577,8 @@ impl ComboLoad {
         }
         let mut at = HEADER;
         for _ in 0..count {
-            let keys = byte(at)? as usize;
-            at += 1;
-            if keys == 0 || keys > 8 {
-                return Err(ComboRecordError::Corrupt);
-            }
-            let mut mask = 0u64;
-            for _ in 0..keys {
-                let p = byte(at)?;
-                if p >= 64 {
-                    return Err(ComboRecordError::Corrupt);
-                }
-                mask |= 1 << p;
-                at += 1;
-            }
-            let (action, n) = record::read_action(&bytes[at.min(bytes.len())..])
-                .map_err(|_| ComboRecordError::Corrupt)?;
-            at += n;
-            let layers = u32::from(byte(at)?);
-            let timeout = u32::from(u16::from_le_bytes([byte(at + 1)?, byte(at + 2)?]));
-            let idle = u32::from(u16::from_le_bytes([byte(at + 3)?, byte(at + 4)?]));
-            let name_len = byte(at + 5)? as usize;
-            at += 6;
-            let name = bytes
-                .get(at..at + name_len)
-                .ok_or(ComboRecordError::Corrupt)?;
-            at += name_len;
-            let name = core::str::from_utf8(name)
-                .ok()
-                .and_then(Name::new)
-                .ok_or(ComboRecordError::Corrupt)?;
-            let spec = ComboSpec {
-                name,
-                def: ComboDef {
-                    keys: mask,
-                    action,
-                    layers,
-                    timeout_ms: timeout,
-                    require_prior_idle_ms: idle,
-                },
-            };
+            let (spec, next) = read_combo(bytes, at)?;
+            at = next;
             set.push(spec).ok_or(ComboRecordError::Corrupt)?;
         }
         if at != bytes.len() || set.len() > total as usize {
@@ -624,6 +586,53 @@ impl ComboLoad {
         }
         Ok(())
     }
+}
+
+/// The combo stored in `bytes` from `at` on (key count, keys, action,
+/// layers, timeout, prior idle, name), and where the next one starts.
+fn read_combo(bytes: &[u8], mut at: usize) -> Result<(ComboSpec, usize), ComboRecordError> {
+    let byte = |i: usize| bytes.get(i).copied().ok_or(ComboRecordError::Corrupt);
+    let keys = byte(at)? as usize;
+    at += 1;
+    if keys == 0 || keys > 8 {
+        return Err(ComboRecordError::Corrupt);
+    }
+    let mut mask = 0u64;
+    for _ in 0..keys {
+        let p = byte(at)?;
+        if p >= 64 {
+            return Err(ComboRecordError::Corrupt);
+        }
+        mask |= 1 << p;
+        at += 1;
+    }
+    let (action, n) = record::read_action(&bytes[at.min(bytes.len())..])
+        .map_err(|_| ComboRecordError::Corrupt)?;
+    at += n;
+    let layers = u32::from(byte(at)?);
+    let timeout = u32::from(u16::from_le_bytes([byte(at + 1)?, byte(at + 2)?]));
+    let idle = u32::from(u16::from_le_bytes([byte(at + 3)?, byte(at + 4)?]));
+    let name_len = byte(at + 5)? as usize;
+    at += 6;
+    let name = bytes
+        .get(at..at + name_len)
+        .ok_or(ComboRecordError::Corrupt)?;
+    at += name_len;
+    let name = core::str::from_utf8(name)
+        .ok()
+        .and_then(Name::new)
+        .ok_or(ComboRecordError::Corrupt)?;
+    let spec = ComboSpec {
+        name,
+        def: ComboDef {
+            keys: mask,
+            action,
+            layers,
+            timeout_ms: timeout,
+            require_prior_idle_ms: idle,
+        },
+    };
+    Ok((spec, at))
 }
 
 #[cfg(test)]

@@ -198,15 +198,7 @@ fn latency(name: &str, events: &[Event]) {
     for now in 0..end {
         while next < events.len() && events[next].0 == now {
             let (_, pos, down) = events[next];
-            if down {
-                if let kb_core::Action::Key(k) = kb.binding(pos) {
-                    let letter = (b'a' + k.code.wrapping_sub(0x04)) as char;
-                    pending.push((now, k.code, if k.code == 0x2C { ' ' } else { letter }));
-                }
-                kb.press(pos, now);
-            } else {
-                kb.release(pos, now);
-            }
+            feed_timed(&mut kb, now, pos, down, &mut pending);
             next += 1;
         }
         kb.tick(now);
@@ -222,6 +214,25 @@ fn latency(name: &str, events: &[Event]) {
             }
         }
     }
+    print_latency(name, &delays);
+}
+
+/// Press or release `pos` at `now`; a press of a key with a usage is
+/// remembered in `pending` (press time, usage, letter) until it is reported.
+fn feed_timed(kb: &mut Kb, now: u32, pos: u8, down: bool, pending: &mut Vec<(u32, u8, char)>) {
+    if !down {
+        kb.release(pos, now);
+        return;
+    }
+    if let kb_core::Action::Key(k) = kb.binding(pos) {
+        let letter = (b'a' + k.code.wrapping_sub(0x04)) as char;
+        pending.push((now, k.code, if k.code == 0x2C { ' ' } else { letter }));
+    }
+    kb.press(pos, now);
+}
+
+/// One row of the latency table, from the (delay, letter) of every key.
+fn print_latency(name: &str, delays: &[(u32, char)]) {
     let delayed: Vec<String> = delays
         .iter()
         .filter(|d| d.0 > 0)

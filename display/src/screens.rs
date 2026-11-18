@@ -946,63 +946,107 @@ fn sleep_rain(lane: usize, elapsed: u32) -> impl Iterator<Item = (i32, i32)> {
 /// last block cursor blinks before the screen goes dark.
 pub fn sleep_art(frame: &mut Frame, half: Half, elapsed: u32, from: &Frame) {
     *frame = Frame::default();
-    let mut p = Portrait { frame, half };
-    let h = PORTRAIT_HEIGHT as i32;
     if elapsed < SLEEP_FALL_END {
         for lane in 0..PORTRAIT_WIDTH / RAIN_PITCH_X as usize {
-            // Each column drops at its own moment, speeding up as it falls,
-            // while its top dissolves into the lane's rain: each pixel of
-            // the rain is one taken from there, so nothing is ever added.
-            let columns = lane * RAIN_PITCH_X as usize..(lane + 1) * RAIN_PITCH_X as usize;
-            let mut eaten = 0;
-            for x in columns.clone() {
-                let fall = sleep_fall(x, elapsed);
-                for y in 0..(h - fall).max(0) as usize {
-                    let (mx, my) = half.module_xy(x, y);
-                    if !from.get(mx, my) {
-                        continue;
-                    }
-                    if y < fall as usize / 2 {
-                        eaten += 1;
-                    } else {
-                        let (tx, ty) = half.module_xy(x, y + fall as usize);
-                        p.frame.set(tx, ty, true);
-                    }
-                }
-            }
-            for (x, y) in sleep_rain(lane, elapsed) {
-                if eaten == 0 {
-                    break;
-                }
-                if y >= h {
-                    eaten -= 1;
-                    continue;
-                }
-                let (mx, my) = half.module_xy(x as usize, y as usize);
-                if !p.frame.get(mx, my) {
-                    p.frame.set(mx, my, true);
-                    eaten -= 1;
-                }
-            }
-            // What the rain has no room for yet falls on with its column.
-            for x in columns {
-                let fall = sleep_fall(x, elapsed);
-                for y in (0..(fall as usize / 2).min((h - fall).max(0) as usize)).rev() {
-                    let (mx, my) = half.module_xy(x, y);
-                    if eaten > 0 && from.get(mx, my) {
-                        eaten -= 1;
-                        let (tx, ty) = half.module_xy(x, y + fall as usize);
-                        p.frame.set(tx, ty, true);
-                    }
-                }
-            }
+            sleep_melt_lane(frame, half, elapsed, from, lane);
         }
     } else if ((elapsed - SLEEP_FALL_END) / 150).is_multiple_of(2) {
         // The last cursor, blinking.
+        let h = PORTRAIT_HEIGHT as i32;
+        let mut p = Portrait { frame, half };
         let _ = Rectangle::new(Point::new(CENTER - 3, h / 2 - 5), Size::new(6, 10))
             .into_styled(PrimitiveStyle::with_fill(BinaryColor::On))
             .draw(&mut p);
     }
+}
+
+/// One rain lane of the power-down melt. Each column drops at its own
+/// moment, speeding up as it falls, while its top dissolves into the lane's
+/// rain: each pixel of the rain is one taken from there, so nothing is ever
+/// added.
+fn sleep_melt_lane(frame: &mut Frame, half: Half, elapsed: u32, from: &Frame, lane: usize) {
+    let columns = lane * RAIN_PITCH_X as usize..(lane + 1) * RAIN_PITCH_X as usize;
+    let mut eaten = 0;
+    for x in columns.clone() {
+        eaten += sleep_drop_column(frame, half, elapsed, from, x);
+    }
+    eaten = sleep_rain_fill(frame, half, elapsed, lane, eaten);
+    // What the rain has no room for yet falls on with its column.
+    for x in columns {
+        eaten = sleep_spill_column(frame, half, elapsed, from, x, eaten);
+    }
+}
+
+/// Column `x` of `from`, dropped by its fall: the lit pixels below its
+/// dissolving top land lower down in `frame`. Returns how many lit pixels the
+/// top has eaten (the rain's budget).
+fn sleep_drop_column(frame: &mut Frame, half: Half, elapsed: u32, from: &Frame, x: usize) -> u32 {
+    let h = PORTRAIT_HEIGHT as i32;
+    let fall = sleep_fall(x, elapsed);
+    let mut eaten = 0;
+    for y in 0..(h - fall).max(0) as usize {
+        let (mx, my) = half.module_xy(x, y);
+        if !from.get(mx, my) {
+            continue;
+        }
+        if y < fall as usize / 2 {
+            eaten += 1;
+        } else {
+            let (tx, ty) = half.module_xy(x, y + fall as usize);
+            frame.set(tx, ty, true);
+        }
+    }
+    eaten
+}
+
+/// Lights lane `lane`'s rain, one pixel for each of the `eaten` ones (those
+/// past the bottom spend theirs too). Returns what is left over.
+fn sleep_rain_fill(
+    frame: &mut Frame,
+    half: Half,
+    elapsed: u32,
+    lane: usize,
+    mut eaten: u32,
+) -> u32 {
+    let h = PORTRAIT_HEIGHT as i32;
+    for (x, y) in sleep_rain(lane, elapsed) {
+        if eaten == 0 {
+            break;
+        }
+        if y >= h {
+            eaten -= 1;
+            continue;
+        }
+        let (mx, my) = half.module_xy(x as usize, y as usize);
+        if !frame.get(mx, my) {
+            frame.set(mx, my, true);
+            eaten -= 1;
+        }
+    }
+    eaten
+}
+
+/// Column `x`'s eaten top pixels the rain had no room for, from the bottom
+/// up, falling on with the column while `eaten` lasts. Returns what is left.
+fn sleep_spill_column(
+    frame: &mut Frame,
+    half: Half,
+    elapsed: u32,
+    from: &Frame,
+    x: usize,
+    mut eaten: u32,
+) -> u32 {
+    let h = PORTRAIT_HEIGHT as i32;
+    let fall = sleep_fall(x, elapsed);
+    for y in (0..(fall as usize / 2).min((h - fall).max(0) as usize)).rev() {
+        let (mx, my) = half.module_xy(x, y);
+        if eaten > 0 && from.get(mx, my) {
+            eaten -= 1;
+            let (tx, ty) = half.module_xy(x, y + fall as usize);
+            frame.set(tx, ty, true);
+        }
+    }
+    eaten
 }
 
 fn portrait_central(p: &mut Portrait<'_>, status: &Status, layer_names: &[&str], anim: &Anim) {

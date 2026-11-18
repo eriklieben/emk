@@ -2,8 +2,10 @@
 <!-- The SonarQube Cloud analysis settings, for CI's sonar job: SonarScanner for .NET reads them with /s: (it doesn't
      read sonar-project.properties). docs/development.md, "Code analysis", explains the choices. -->
 <SonarQubeAnalysisProperties xmlns="http://www.sonarsource.com/msbuild/integration/2015/1">
-  <!-- Not analysed: build output, rendered media, local ZMK builds, generated code. -->
-  <Property Name="sonar.exclusions">**/target/**,**/bin/**,**/obj/**,**/TestResults/**,build/**,backup/**,docs/media/**,.cargo-home/**,**/*.g.cs</Property>
+  <!-- Not analysed: build output, rendered media, local ZMK builds, generated code, installed packages, and the
+       maintainer scripts (the root helpers, the firmware build and DFU check scripts, the release scripts in eng/):
+       they run on a developer's machine or in CI on inputs the maintainer passes, and ship nothing. -->
+  <Property Name="sonar.exclusions">**/target/**,**/bin/**,**/obj/**,**/TestResults/**,build/**,backup/**,docs/media/**,.cargo-home/**,**/*.g.cs,**/node_modules/**,dev,coverage,emulate,docs-media,hil,size-report,fw-nrf/build-uf2,fw-nrf/build-bootloader,fw-nrf/dfu-verify.py,eng/**</Property>
   <!-- Rust tests (integration tests and the test aids) are test code: test rules, not counted as lines of code. The
        .NET test projects are marked in emulator/Directory.Build.props. -->
   <Property Name="sonar.test.inclusions">**/tests/**,ble/src/test_flash.rs</Property>

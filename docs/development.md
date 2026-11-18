@@ -152,7 +152,14 @@ Check a message by hand: `echo "feat(display): add a battery screen" | pnpm exec
   [`eng/SonarQube.Analysis.xml`](../eng/SonarQube.Analysis.xml): the same coverage exclusions
   as `./coverage` (plus the firmware and scripts), and the build's own warnings aren't imported
   again (`sonar.cs.roslyn.ignoreIssues`). Fork pull requests get no secrets, so the job is
-  skipped for them; it never holds up a release (`continue-on-error`).
+  skipped for them; it never holds up a release (`continue-on-error`). Automatic Analysis is
+  off in the SonarQube Cloud project: it would clash with this job and ignores these settings.
+- **Not analysed:** build output, rendered media, generated code, and the maintainer scripts:
+  the helpers at the root (`dev`, `coverage`, `emulate`, `docs-media`, `hil`, `size-report`),
+  the firmware's build and check scripts (`fw-nrf/build-uf2`, `fw-nrf/build-bootloader`,
+  `fw-nrf/dfu-verify.py`) and the release scripts in `eng/`. They run on a maintainer's
+  machine or in CI, on files the maintainer names, and aren't part of the firmware or the app;
+  ruff (CI's lint job) still checks `dfu-verify.py`.
 
 ## Status
 

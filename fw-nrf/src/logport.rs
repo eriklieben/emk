@@ -407,15 +407,7 @@ pub async fn log_task(
         if reader != open {
             open = reader;
             out_len = 0;
-            end_session(&mut injected).await;
-            if open {
-                session.start();
-                lines.reset();
-                dlog!("log port: reader connected");
-            } else {
-                session.set_debug(false);
-                dlog!("log port: reader gone");
-            }
+            reader_changed(open, &mut session, &mut lines, &mut injected).await;
         }
         if open && out_len == 0 {
             out_len = session.next_packet(&mut out);
@@ -430,37 +422,10 @@ pub async fn log_task(
         // waits until they are out.
         let reading = session.studio.backlog() <= studio::ACKS - 24;
         let event = select4(
-            async {
-                if writing {
-                    tx.write_packet(&out[..out_len]).await
-                } else {
-                    core::future::pending().await
-                }
-            },
-            async {
-                if reading {
-                    rx.read_packet(&mut input).await
-                } else {
-                    core::future::pending().await
-                }
-            },
+            only_if(writing, tx.write_packet(&out[..out_len])),
+            only_if(reading, rx.read_packet(&mut input)),
             control.control_changed(),
-            async {
-                match (idle, debug) {
-                    // Not every status change pokes (the link stage, say):
-                    // look again now and then.
-                    (true, true) => {
-                        select3(
-                            log::ring().wait_new(),
-                            POKE.wait(),
-                            Timer::after(Duration::from_millis(250)),
-                        )
-                        .await;
-                    }
-                    (true, false) => log::ring().wait_new().await,
-                    _ => core::future::pending().await,
-                }
-            },
+            more_to_send(idle, debug),
         )
         .await;
         match event {
@@ -476,20 +441,78 @@ pub async fn log_task(
             }
             Either4::Second(Ok(n)) => {
                 rx_seen = true;
-                let mut commands = [None; 24];
-                let mut count = 0;
-                lines.feed(&input[..n], |c| {
-                    if let Some(slot) = commands.get_mut(count) {
-                        *slot = Some(c);
-                        count += 1;
-                    }
-                });
-                for command in commands.into_iter().flatten() {
-                    run(command, &mut session, &mut injected).await;
-                }
+                take_input(&input[..n], &mut lines, &mut session, &mut injected).await;
             }
             Either4::Third(()) | Either4::Fourth(()) => {}
         }
+    }
+}
+
+/// `future`'s output, or never when `wanted` is false (`future` is then
+/// dropped without being polled).
+async fn only_if<F: core::future::Future>(wanted: bool, future: F) -> F::Output {
+    if wanted {
+        future.await
+    } else {
+        core::future::pending().await
+    }
+}
+
+/// Returns once there may be more to send to an `idle` reader: a new log
+/// line, or with the `debug` stream (or Studio) on, a status change.
+async fn more_to_send(idle: bool, debug: bool) {
+    match (idle, debug) {
+        // Not every status change pokes (the link stage, say):
+        // look again now and then.
+        (true, true) => {
+            select3(
+                log::ring().wait_new(),
+                POKE.wait(),
+                Timer::after(Duration::from_millis(250)),
+            )
+            .await;
+        }
+        (true, false) => log::ring().wait_new().await,
+        _ => core::future::pending().await,
+    }
+}
+
+/// A reader came (`open`) or went: end the old session and start afresh.
+async fn reader_changed(
+    open: bool,
+    session: &mut Session,
+    lines: &mut LineReader<LINE_MAX>,
+    injected: &mut u64,
+) {
+    end_session(injected).await;
+    if open {
+        session.start();
+        lines.reset();
+        dlog!("log port: reader connected");
+    } else {
+        session.set_debug(false);
+        dlog!("log port: reader gone");
+    }
+}
+
+/// Bytes the reader sent: run the commands of the lines they complete (up
+/// to 24 per packet).
+async fn take_input(
+    input: &[u8],
+    lines: &mut LineReader<LINE_MAX>,
+    session: &mut Session,
+    injected: &mut u64,
+) {
+    let mut commands = [None; 24];
+    let mut count = 0;
+    lines.feed(input, |c| {
+        if let Some(slot) = commands.get_mut(count) {
+            *slot = Some(c);
+            count += 1;
+        }
+    });
+    for command in commands.into_iter().flatten() {
+        run(command, session, injected).await;
     }
 }
 

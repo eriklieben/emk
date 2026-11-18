@@ -466,16 +466,6 @@ async fn serve<S: NorFlash>(
     stored: Option<Identity>,
     verified: &Cell<bool>,
 ) {
-    let accept = |why: &str| {
-        ring_log!(state.log, "split: left half {}", why);
-        verified.set(true);
-        state.split.linked.store(true, Ordering::Relaxed);
-        state.set_stage(Stage::Linked);
-    };
-    let reject = |why: &str| {
-        ring_log!(state.log, "split: dropping a connection: {}", why);
-        conn.raw().disconnect();
-    };
     // Messages from the computer, chunk by chunk (one per connection: a
     // message cut off by a lost link is dropped).
     let mut messages = Reassembler::new();
@@ -487,28 +477,15 @@ async fn serve<S: NorFlash>(
             }
             // Is it the left half? The rule is `kb_core::link::right_half_verdict`.
             GattConnectionEvent::PairingComplete { bond, .. } => {
-                let event = SplitEvent::Paired {
-                    bond: bond.as_ref().map(|b| b.identity.addr),
-                };
-                match right_half_verdict(stored.map(|id| id.addr).as_ref(), event) {
-                    SplitVerdict::Accept { .. } => {
-                        if let Some(bond) = bond {
-                            storage::store_bond(storage, buf, SPLIT_BOND, Some(bond), state.log)
-                                .await;
-                        }
-                        accept("paired");
-                    }
-                    SplitVerdict::Reject => reject("paired, but not with the stored bond"),
-                    SplitVerdict::Wait => {}
-                }
+                paired(state, conn, storage, buf, stored, verified, bond).await;
             }
             GattConnectionEvent::Encrypted { bond, .. } => {
                 let event = SplitEvent::Encrypted {
                     bond: bond.as_ref().map(|b| b.identity.addr),
                 };
                 match right_half_verdict(stored.map(|id| id.addr).as_ref(), event) {
-                    SplitVerdict::Accept { .. } => accept("reconnected"),
-                    SplitVerdict::Reject => reject("encrypted with another bond"),
+                    SplitVerdict::Accept { .. } => accept(state, verified, "reconnected"),
+                    SplitVerdict::Reject => reject(state, conn, "encrypted with another bond"),
                     SplitVerdict::Wait => {}
                 }
             }
@@ -520,40 +497,90 @@ async fn serve<S: NorFlash>(
                 let _ = conn.pass_key_confirm();
             }
             GattConnectionEvent::Gatt { event } => {
-                if let GattEvent::Write(write) = &event
-                    && write.handle() == server.split.left_presses.handle
-                    && verified.get()
-                {
-                    write.with_data(|_, data| {
-                        if let [lo, hi, ..] = *data {
-                            state
-                                .left_presses
-                                .store(u16::from_le_bytes([lo, hi]), Ordering::Relaxed);
-                            state.left_presses_changed.signal(());
-                        }
-                    });
-                }
-                if let GattEvent::Write(write) = &event
-                    && write.handle() == server.split.notification.handle
-                    && verified.get()
-                {
-                    let message = write.with_data(|offset, data| {
-                        if offset == 0 {
-                            messages.feed(data)
-                        } else {
-                            None
-                        }
-                    });
-                    if let Some(message) = message {
-                        ring_log!(state.log, "split: message from the computer");
-                        state.notification.put(message);
-                    }
+                if verified.get() {
+                    take_write(state, server, &mut messages, &event);
                 }
                 if let Ok(reply) = event.accept() {
                     reply.send().await;
                 }
             }
             _ => {}
+        }
+    }
+}
+
+/// The connection is the left half: the link is up.
+fn accept(state: &RightState<'_>, verified: &Cell<bool>, why: &str) {
+    ring_log!(state.log, "split: left half {}", why);
+    verified.set(true);
+    state.split.linked.store(true, Ordering::Relaxed);
+    state.set_stage(Stage::Linked);
+}
+
+/// The connection is not the left half: drop it.
+fn reject(state: &RightState<'_>, conn: &GattConnection<'_, '_, DefaultPacketPool>, why: &str) {
+    ring_log!(state.log, "split: dropping a connection: {}", why);
+    conn.raw().disconnect();
+}
+
+/// Pairing completed: accept the left half (storing its new bond), drop a
+/// stranger, or wait for more.
+async fn paired<S: NorFlash>(
+    state: &RightState<'_>,
+    conn: &GattConnection<'_, '_, DefaultPacketPool>,
+    storage: &mut MapStorage<u8, S, NoCache>,
+    buf: &mut [u8],
+    stored: Option<Identity>,
+    verified: &Cell<bool>,
+    bond: Option<BondInformation>,
+) {
+    let event = SplitEvent::Paired {
+        bond: bond.as_ref().map(|b| b.identity.addr),
+    };
+    match right_half_verdict(stored.map(|id| id.addr).as_ref(), event) {
+        SplitVerdict::Accept { .. } => {
+            if let Some(bond) = bond {
+                storage::store_bond(storage, buf, SPLIT_BOND, Some(bond), state.log).await;
+            }
+            accept(state, verified, "paired");
+        }
+        SplitVerdict::Reject => reject(state, conn, "paired, but not with the stored bond"),
+        SplitVerdict::Wait => {}
+    }
+}
+
+/// What the verified left half writes: its key press count, and messages
+/// from the computer (chunk by chunk, put together in `messages`).
+fn take_write(
+    state: &RightState<'_>,
+    server: &SplitServer<'_>,
+    messages: &mut Reassembler,
+    event: &GattEvent<'_, '_, DefaultPacketPool>,
+) {
+    let GattEvent::Write(write) = event else {
+        return;
+    };
+    if write.handle() == server.split.left_presses.handle {
+        write.with_data(|_, data| {
+            if let [lo, hi, ..] = *data {
+                state
+                    .left_presses
+                    .store(u16::from_le_bytes([lo, hi]), Ordering::Relaxed);
+                state.left_presses_changed.signal(());
+            }
+        });
+    }
+    if write.handle() == server.split.notification.handle {
+        let message = write.with_data(|offset, data| {
+            if offset == 0 {
+                messages.feed(data)
+            } else {
+                None
+            }
+        });
+        if let Some(message) = message {
+            ring_log!(state.log, "split: message from the computer");
+            state.notification.put(message);
         }
     }
 }

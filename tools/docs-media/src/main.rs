@@ -50,7 +50,7 @@ fn assemble_all(frames: &Path, dir: &Path) -> Result<(), String> {
     for scene in scenes {
         let name = scene
             .file_name()
-            .and_then(|n| n.to_str())
+            .and_then(std::ffi::OsStr::to_str)
             .unwrap_or("scene")
             .to_string();
         let gif = assemble::assemble(

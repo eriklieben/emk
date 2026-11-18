@@ -124,7 +124,8 @@ impl Sim {
 
     /// Play the start-up animation, as after switching the keyboard on.
     pub fn power_on(&mut self) {
-        kb_emu::kb_emu_replay_boot(&raw mut self.emu);
+        // SAFETY: a pointer to this scene's own live emulator, only for the call.
+        unsafe { kb_emu::kb_emu_replay_boot(&raw mut self.emu) };
     }
 
     /// Let `ms` milliseconds pass, recording a frame every [`FRAME_MS`].

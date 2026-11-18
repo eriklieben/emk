@@ -29,6 +29,7 @@ failure. Treats its inputs as data only.
 import argparse
 import hashlib
 import json
+import math
 import struct
 import sys
 import zipfile
@@ -69,18 +70,26 @@ def check(ok: bool, what: str) -> bool:
     return ok
 
 
+def input_file(path: str) -> Path:
+    """The file named on the command line, resolved; exits if it isn't an existing regular file."""
+    resolved = Path(path).resolve()
+    if not resolved.is_file():
+        raise SystemExit(f"{path}: no such file")
+    return resolved
+
+
 def pubkey_from_pem(path: str) -> bytes:
     # The key is read with python-ecdsa, as adafruit-nrfutil does (it writes
     # PKCS#8 v2, which `cryptography` refuses); verifying below uses OpenSSL
     # through `cryptography`, so signing and checking are separate code.
     from ecdsa import SigningKey  # noqa: PLC0415 - only needed with --key-file
 
-    return SigningKey.from_pem(Path(path).read_bytes()).get_verifying_key().to_string()
+    return SigningKey.from_pem(input_file(path).read_bytes()).get_verifying_key().to_string()
 
 
 def elf_symbol(path: str, name: str) -> tuple[int, int]:
     """Address and size of a symbol in a little-endian ELF32 file."""
-    data = Path(path).read_bytes()
+    data = input_file(path).read_bytes()
     if data[:4] != b"\x7fELF" or data[4] != 1 or data[5] != 1:
         raise SystemExit(f"{path}: not a little-endian ELF32 file")
     shoff, = struct.unpack_from("<I", data, 0x20)
@@ -100,7 +109,7 @@ def elf_symbol(path: str, name: str) -> tuple[int, int]:
 
 def uf2_memory(path: str) -> dict[int, int]:
     mem: dict[int, int] = {}
-    data = Path(path).read_bytes()
+    data = input_file(path).read_bytes()
     for i in range(0, len(data), 512):
         m0, m1, _flags, addr, size = struct.unpack_from("<5I", data, i)
         if (m0, m1) != (0x0A324655, 0x9E5D5157):
@@ -113,7 +122,7 @@ def uf2_memory(path: str) -> dict[int, int]:
 def hex_memory(path: str) -> dict[int, int]:
     mem: dict[int, int] = {}
     upper = 0
-    for raw_line in Path(path).read_text().splitlines():
+    for raw_line in input_file(path).read_text().splitlines():
         line = raw_line.strip()
         if not line.startswith(":"):
             continue
@@ -169,11 +178,13 @@ def verify_package(path: str, pk: bytes, app_hex: str | None = None) -> bool:
             refused.append(what)
         return ok
 
-    with zipfile.ZipFile(path) as z:
+    with zipfile.ZipFile(input_file(path)) as z:
         manifest = json.loads(z.read("manifest.json"))["manifest"]
         parts = sorted(k for k in manifest if k != "dfu_version")
         check(parts in (["application"], ["bootloader"]), f"package holds an application or a bootloader: {parts}")
-        check(manifest.get("dfu_version") == 0.8, f"dfu_version {manifest.get('dfu_version')} (0.8 = signed)")
+        dfu_version = manifest.get("dfu_version")
+        signed = isinstance(dfu_version, float) and math.isclose(dfu_version, 0.8)
+        check(signed, f"dfu_version {dfu_version} (0.8 = signed)")
         kind = parts[0]
         app = manifest[kind]
         dat = z.read(app["dat_file"])

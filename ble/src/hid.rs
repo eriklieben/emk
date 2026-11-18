@@ -703,14 +703,7 @@ async fn serve<C, S: NorFlash>(
                     security_level,
                 } => {
                     hid.stop_asking();
-                    if security_level == SecurityLevel::EncryptedAuthenticated {
-                        ring_log!(log, "host: paired with a code (MITM protected)");
-                    } else {
-                        ring_log!(
-                            log,
-                            "host: paired without a code (the computer can't show or type one)"
-                        );
-                    }
+                    log_paired(log, security_level);
                     if !store_pairing(state, store, profiles, i, bond, &mut buf).await {
                         conn.raw().disconnect();
                         continue;
@@ -766,6 +759,18 @@ async fn serve<C, S: NorFlash>(
     };
     let keys = send_reports(state, stack, conn, server, timing, &secure, &is_secure);
     select(events, keys).await;
+}
+
+/// Log how a computer paired: with a code or without.
+fn log_paired(log: &crate::LogRing, security_level: SecurityLevel) {
+    if security_level == SecurityLevel::EncryptedAuthenticated {
+        ring_log!(log, "host: paired with a code (MITM protected)");
+    } else {
+        ring_log!(
+            log,
+            "host: paired without a code (the computer can't show or type one)"
+        );
+    }
 }
 
 /// Put pairing `request` up for the user (and in the log); until when it

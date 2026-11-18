@@ -99,8 +99,9 @@ impl<const N: usize> Search<'_, '_, N> {
             .any(|&(m, h)| m == momentary && h & held == h)
     }
 
+    /// Whether the unlock key can be pressed starting with `momentary`
+    /// layers on and the `held` keys held.
     fn from(&mut self, momentary: u32, held: u64) -> Reach {
-        const UNLOCK: Action = Action::System(SystemAction::StudioUnlock);
         if self.budget == 0 {
             return Reach::TooComplex;
         }
@@ -108,31 +109,41 @@ impl<const N: usize> Search<'_, '_, N> {
         if self.known_dead(momentary, held) {
             return Reach::No;
         }
+        if self.unlock_at_hand(momentary, held) {
+            return Reach::Yes;
+        }
+        let result = self.through_layers(momentary, held);
+        if result == Reach::No && self.dead_len < DEAD_ENDS {
+            self.dead[self.dead_len] = (momentary, held);
+            self.dead_len += 1;
+        }
+        result
+    }
+
+    /// Whether a free key, or a combo that can be pressed, is the unlock key
+    /// right away.
+    fn unlock_at_hand(&self, momentary: u32, held: u64) -> bool {
+        const UNLOCK: Action = Action::System(SystemAction::StudioUnlock);
         let active = self.active(momentary);
-        let free = |pos: usize| held & (1 << pos) == 0;
-        if (0..N).any(|pos| free(pos) && self.resolve(active, pos) == UNLOCK) {
-            return Reach::Yes;
+        if (0..N).any(|pos| held & (1 << pos) == 0 && self.resolve(active, pos) == UNLOCK) {
+            return true;
         }
-        let highest = 31 - active.leading_zeros() as u8;
-        let positions = if N >= 64 { u64::MAX } else { (1u64 << N) - 1 };
-        let pressable = |c: &&ComboDef| {
-            c.keys != 0 && c.keys & !positions == 0 && c.keys & held == 0 && c.enabled_on(highest)
-        };
-        if self
-            .combos
+        let highest = Self::highest(active);
+        self.combos
             .iter()
-            .filter(pressable)
+            .filter(|c| Self::pressable(c, held, highest))
             .any(|c| c.action == UNLOCK)
-        {
-            return Reach::Yes;
-        }
+    }
+
+    /// The search on, through each momentary layer that a combo that can be
+    /// pressed or a free key switches on.
+    fn through_layers(&mut self, momentary: u32, held: u64) -> Reach {
+        let active = self.active(momentary);
+        let highest = Self::highest(active);
         let mut result = Reach::No;
         let combos = self.combos;
-        for c in combos.iter().filter(pressable) {
-            if let Action::MomentaryLayer(layer) = c.action
-                && (layer as usize) < self.layers.len()
-                && momentary & (1 << layer) == 0
-            {
+        for c in combos.iter().filter(|c| Self::pressable(c, held, highest)) {
+            if let Some(layer) = self.new_layer(c.action, momentary) {
                 match self.from(momentary | 1 << layer, held | c.keys) {
                     Reach::Yes => return Reach::Yes,
                     Reach::TooComplex => result = Reach::TooComplex,
@@ -140,11 +151,8 @@ impl<const N: usize> Search<'_, '_, N> {
                 }
             }
         }
-        for pos in (0..N).filter(|&p| free(p)) {
-            if let Action::MomentaryLayer(layer) = self.resolve(active, pos)
-                && (layer as usize) < self.layers.len()
-                && momentary & (1 << layer) == 0
-            {
+        for pos in (0..N).filter(|&p| held & (1 << p) == 0) {
+            if let Some(layer) = self.new_layer(self.resolve(active, pos), momentary) {
                 match self.from(momentary | 1 << layer, held | 1 << pos) {
                     Reach::Yes => return Reach::Yes,
                     Reach::TooComplex => result = Reach::TooComplex,
@@ -152,11 +160,32 @@ impl<const N: usize> Search<'_, '_, N> {
                 }
             }
         }
-        if result == Reach::No && self.dead_len < DEAD_ENDS {
-            self.dead[self.dead_len] = (momentary, held);
-            self.dead_len += 1;
-        }
         result
+    }
+
+    /// The highest of the `active` layers.
+    fn highest(active: u32) -> u8 {
+        31 - active.leading_zeros() as u8
+    }
+
+    /// Whether combo `c` can be pressed: it has keys, all of them on the
+    /// keyboard and none `held`, and it is on for layer `highest`.
+    fn pressable(c: &ComboDef, held: u64, highest: u8) -> bool {
+        let positions = if N >= 64 { u64::MAX } else { (1u64 << N) - 1 };
+        c.keys != 0 && c.keys & !positions == 0 && c.keys & held == 0 && c.enabled_on(highest)
+    }
+
+    /// The layer `action` switches on, if it is a momentary layer that exists
+    /// and isn't on in `momentary` yet.
+    fn new_layer(&self, action: Action, momentary: u32) -> Option<u8> {
+        if let Action::MomentaryLayer(layer) = action
+            && (layer as usize) < self.layers.len()
+            && momentary & (1 << layer) == 0
+        {
+            Some(layer)
+        } else {
+            None
+        }
     }
 }
 

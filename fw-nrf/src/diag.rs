@@ -30,7 +30,7 @@ struct Record {
 static mut RECORD: MaybeUninit<Record> = MaybeUninit::uninit();
 
 /// Text to show instead of the status screen: (title, text).
-pub static MESSAGE: Signal<CriticalSectionRawMutex, (&'static str, Text)> = Signal::new();
+pub static MESSAGE: Signal<CriticalSectionRawMutex, (&str, Text)> = Signal::new();
 
 /// A short fixed-capacity string.
 #[derive(Clone, Copy)]

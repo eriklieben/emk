@@ -293,35 +293,7 @@ impl Animator {
         a.now = now;
         let seen = Seen::of(status);
         if let Some(before) = self.seen {
-            if seen.layer != before.layer {
-                a.layer_from = before.layer;
-                // One frame in already, so the change shows on the first frame.
-                a.layer_at = Some(now.wrapping_sub(FRAME_MS));
-            }
-            if seen.connected && !before.connected {
-                a.connected_at = Some(now);
-            }
-            if seen.linked && !before.linked {
-                a.linked_at = Some(now);
-            }
-            if seen.link_detail != before.link_detail || seen.link_requests != before.link_requests
-            {
-                a.link_at = Some(now);
-            }
-            if seen.radio_changes != before.radio_changes {
-                a.radio_at = Some(now);
-            }
-            if seen.studio_unlocked != before.studio_unlocked {
-                a.studio_at = Some(now);
-            }
-            if seen.notification != before.notification {
-                a.note_at = seen.notification.map(|_| now);
-                // Cleared: keep the old message to let it fall away.
-                if seen.notification.is_none() {
-                    a.cleared_note = before.notification;
-                    a.cleared_at = Some(now);
-                }
-            }
+            a.note_changes(&before, &seen, now);
         } else {
             if seen.notification.is_some() {
                 a.note_at = Some(now);
@@ -335,31 +307,10 @@ impl Animator {
             .presses
             .map_or(0, |p| status.key_presses.wrapping_sub(p));
         self.presses = Some(status.key_presses);
-        for d in &mut a.drops {
-            if d.is_some_and(|d| d.head(now) >= RAIN_SPAN_ROWS) {
-                *d = None;
-            }
-        }
-        for i in 0..pressed.min(4) {
-            let seed = mix(now ^ u32::from(status.key_presses.wrapping_sub(i)) << 16);
-            let drop = Drop { at: now, seed };
-            // A free slot, or the oldest drop.
-            let slot = a.drops.iter().position(Option::is_none).unwrap_or_else(|| {
-                (0..RAIN_DROPS)
-                    .min_by_key(|&k| {
-                        a.drops[k]
-                            .map_or(0, |d| now.wrapping_sub(d.at))
-                            .wrapping_neg()
-                    })
-                    .unwrap_or(0)
-            });
-            a.drops[slot] = Some(drop);
-        }
+        a.rain(pressed, status.key_presses, now);
         *a
     }
 
-    /// Milliseconds until the screen of `half` changes by itself, or `None`
-    /// when it is still.
     /// While the start-up animation plays: the halves linking is what the
     /// start-up itself shows, so the `linked` stage doesn't show again once
     /// the status screen is revealed. Stages on the way and errors still do.
@@ -368,78 +319,160 @@ impl Animator {
         self.anim
     }
 
+    /// Milliseconds until the screen of `half` changes by itself, or `None`
+    /// when it is still.
+    #[must_use]
     pub fn next_frame(&self, half: Half, status: &Status) -> Option<u32> {
         let a = &self.anim;
-        let mut next: Option<u32> = None;
-        let mut want = |ms: u32| next = Some(next.map_or(ms, |n| n.min(ms)));
+        let mut next = Soonest(None);
+        a.next_shared(half, status, &mut next);
+        match half {
+            Half::Left => a.next_left(status, &mut next),
+            Half::Right => a.next_right(status, &mut next),
+        }
+        next.0
+    }
+}
 
-        let flash_at = match half {
-            Half::Left => a.connected_at,
-            Half::Right => a.linked_at,
+/// The soonest of the redraws wanted so far, in ms from now.
+struct Soonest(Option<u32>);
+
+impl Soonest {
+    fn want(&mut self, ms: u32) {
+        self.0 = Some(self.0.map_or(ms, |n| n.min(ms)));
+    }
+}
+
+impl Anim {
+    /// Start the transitions for what changed from `before` to `seen`.
+    fn note_changes(&mut self, before: &Seen, seen: &Seen, now: u32) {
+        if seen.layer != before.layer {
+            self.layer_from = before.layer;
+            // One frame in already, so the change shows on the first frame.
+            self.layer_at = Some(now.wrapping_sub(FRAME_MS));
+        }
+        if seen.connected && !before.connected {
+            self.connected_at = Some(now);
+        }
+        if seen.linked && !before.linked {
+            self.linked_at = Some(now);
+        }
+        if seen.link_detail != before.link_detail || seen.link_requests != before.link_requests {
+            self.link_at = Some(now);
+        }
+        if seen.radio_changes != before.radio_changes {
+            self.radio_at = Some(now);
+        }
+        if seen.studio_unlocked != before.studio_unlocked {
+            self.studio_at = Some(now);
+        }
+        if seen.notification != before.notification {
+            self.note_at = seen.notification.map(|_| now);
+            // Cleared: keep the old message to let it fall away.
+            if seen.notification.is_none() {
+                self.cleared_note = before.notification;
+                self.cleared_at = Some(now);
+            }
+        }
+    }
+
+    /// Digital rain: retire the drops that have fallen through and start one
+    /// for each of the `pressed` new key presses (a few at most per frame);
+    /// `key_presses` is the press count so far.
+    fn rain(&mut self, pressed: u16, key_presses: u16, now: u32) {
+        for d in &mut self.drops {
+            if d.is_some_and(|d| d.head(now) >= RAIN_SPAN_ROWS) {
+                *d = None;
+            }
+        }
+        for i in 0..pressed.min(4) {
+            let seed = mix(now ^ u32::from(key_presses.wrapping_sub(i)) << 16);
+            let drop = Drop { at: now, seed };
+            // A free slot, or the oldest drop.
+            let slot = self
+                .drops
+                .iter()
+                .position(Option::is_none)
+                .unwrap_or_else(|| {
+                    (0..RAIN_DROPS)
+                        .min_by_key(|&k| {
+                            self.drops[k]
+                                .map_or(0, |d| now.wrapping_sub(d.at))
+                                .wrapping_neg()
+                        })
+                        .unwrap_or(0)
+                });
+            self.drops[slot] = Some(drop);
+        }
+    }
+
+    /// The redraws both halves want: the connect flash, the link stages and
+    /// the low battery blink.
+    fn next_shared(&self, half: Half, status: &Status, next: &mut Soonest) {
+        let (flash_at, index) = match half {
+            Half::Left => (self.connected_at, 0),
+            Half::Right => (self.linked_at, 1),
         };
-        if a.within(flash_at, CONNECT_FLASH_MS).is_some() {
-            want(FRAME_MS);
+        if self.within(flash_at, CONNECT_FLASH_MS).is_some() {
+            next.want(FRAME_MS);
         }
         if link_in_progress(status.link_detail) {
-            want(FRAME_MS);
+            next.want(FRAME_MS);
         }
         // Redraw when the link stage hides itself.
         if status.link_detail == "linked"
-            && let Some(elapsed) = a.within(a.link_at, LINK_SHOW_MS)
+            && let Some(elapsed) = self.within(self.link_at, LINK_SHOW_MS)
         {
-            want(LINK_SHOW_MS - elapsed);
+            next.want(LINK_SHOW_MS - elapsed);
         }
-        let index = match half {
-            Half::Left => 0,
-            Half::Right => 1,
-        };
         if battery_low(status, index) {
-            want(LOW_BATTERY_BLINK_MS - a.now % LOW_BATTERY_BLINK_MS);
+            next.want(LOW_BATTERY_BLINK_MS - self.now % LOW_BATTERY_BLINK_MS);
         }
-        match half {
-            Half::Left => {
-                if a.within(a.layer_at, LAYER_SLIDE_MS).is_some() {
-                    want(FRAME_MS);
-                }
-                // Redraw when the radio power hides itself.
-                if let Some(elapsed) = a.within(a.radio_at, RADIO_SHOW_MS) {
-                    want(RADIO_SHOW_MS - elapsed);
-                }
-                // ... and when Studio's lock state does.
-                if let Some(elapsed) = a.within(a.studio_at, STUDIO_SHOW_MS) {
-                    want(STUDIO_SHOW_MS - elapsed);
-                }
-                if host_searching(status) {
-                    want(PULSE_STEP_MS - a.now % PULSE_STEP_MS);
-                }
-                if status.caps_word {
-                    want(CAPS_BLINK_MS - a.now % CAPS_BLINK_MS);
-                }
-                if a.drops.iter().any(Option::is_some) {
-                    want(RAIN_FRAME_MS);
-                }
-            }
-            Half::Right => {
-                if !status.peripheral_connected {
-                    want(PULSE_STEP_MS - a.now % PULSE_STEP_MS);
-                }
-                if status.notification.is_none() && a.within(a.cleared_at, NOTE_CLEAR_MS).is_some()
-                {
-                    want(FRAME_MS);
-                }
-                if status.notification.is_none() && a.drops.iter().any(Option::is_some) {
-                    want(RAIN_FRAME_MS);
-                }
-                if status.notification.is_some() {
-                    if a.within(a.note_at, NOTE_DECODE_MS).is_some() {
-                        want(FRAME_MS);
-                    } else if crate::screens::notification_overflow(status, a) > 0 {
-                        want(SCROLL_STEP_MS);
-                    }
-                }
-            }
+    }
+
+    /// The redraws only the left screen wants.
+    fn next_left(&self, status: &Status, next: &mut Soonest) {
+        if self.within(self.layer_at, LAYER_SLIDE_MS).is_some() {
+            next.want(FRAME_MS);
         }
-        next
+        // Redraw when the radio power hides itself.
+        if let Some(elapsed) = self.within(self.radio_at, RADIO_SHOW_MS) {
+            next.want(RADIO_SHOW_MS - elapsed);
+        }
+        // ... and when Studio's lock state does.
+        if let Some(elapsed) = self.within(self.studio_at, STUDIO_SHOW_MS) {
+            next.want(STUDIO_SHOW_MS - elapsed);
+        }
+        if host_searching(status) {
+            next.want(PULSE_STEP_MS - self.now % PULSE_STEP_MS);
+        }
+        if status.caps_word {
+            next.want(CAPS_BLINK_MS - self.now % CAPS_BLINK_MS);
+        }
+        if self.drops.iter().any(Option::is_some) {
+            next.want(RAIN_FRAME_MS);
+        }
+    }
+
+    /// The redraws only the right screen wants.
+    fn next_right(&self, status: &Status, next: &mut Soonest) {
+        if !status.peripheral_connected {
+            next.want(PULSE_STEP_MS - self.now % PULSE_STEP_MS);
+        }
+        if status.notification.is_some() {
+            if self.within(self.note_at, NOTE_DECODE_MS).is_some() {
+                next.want(FRAME_MS);
+            } else if crate::screens::notification_overflow(status, self) > 0 {
+                next.want(SCROLL_STEP_MS);
+            }
+            return;
+        }
+        if self.within(self.cleared_at, NOTE_CLEAR_MS).is_some() {
+            next.want(FRAME_MS);
+        }
+        if self.drops.iter().any(Option::is_some) {
+            next.want(RAIN_FRAME_MS);
+        }
     }
 }
 

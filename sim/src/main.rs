@@ -160,27 +160,14 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let args = parse_args();
 
     if args.list {
-        for (path, dev) in evdev::enumerate().filter(|(_, d)| is_keyboard(d)) {
-            println!("{}\t{}", path.display(), dev.name().unwrap_or("?"));
-        }
+        list_keyboards();
         return Ok(());
     }
 
     let (path, mut dev) = open_keyboard(args.device.as_deref())?;
     println!("keyboard: {path} ({})", dev.name().unwrap_or("?"));
 
-    let mut vdev = if args.watch {
-        println!("watch mode: not grabbing, not typing");
-        None
-    } else {
-        let v = virtual_keyboard().map_err(|e| {
-            format!("cannot create virtual keyboard via /dev/uinput: {e} (see README: Permissions)")
-        })?;
-        wait_for_all_keys_up(&dev);
-        dev.grab()?;
-        println!("grabbed. Typing goes through your Corne keymap. Physical Esc quits.");
-        Some(v)
-    };
+    let mut vdev = take_over(&args, &mut dev)?;
     let verbose = args.verbose || args.watch;
 
     let mut engine = Engine::new(&corne::KEYMAP, Config::default());
@@ -189,50 +176,16 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let mut host = Report::default();
     println!("layer: {}", engine.layer_name(0));
 
-    'outer: loop {
+    loop {
         let timeout = match engine.next_deadline() {
             Some(d) => d.saturating_sub(now()) as i32,
             None => -1,
         };
-        if wait_readable(dev.as_raw_fd(), timeout) {
-            for ev in dev.fetch_events()? {
-                if ev.event_type() != EventType::KEY {
-                    continue;
-                }
-                let (code, value) = (ev.code(), ev.value());
-                if code == layout::QUIT_KEY && value == 1 {
-                    break 'outer;
-                }
-                match (layout::position(code), value) {
-                    (Some(pos), 1) => engine.press(pos, now()),
-                    (Some(pos), 0) => engine.release(pos, now()),
-                    _ => {} // autorepeat (2) or a key outside the Corne grid
-                }
-            }
+        if wait_readable(dev.as_raw_fd(), timeout) && !feed_keys(&mut dev, &mut engine, &now)? {
+            break;
         }
         engine.tick(now());
-
-        while let Some(out) = engine.poll() {
-            match out {
-                Output::Report(r) => {
-                    if verbose {
-                        println!("  {}", describe(&host, &r));
-                    }
-                    if let Some(v) = vdev.as_mut() {
-                        send(v, &host, &r)?;
-                    }
-                    host = r;
-                }
-                Output::Layer(l) => println!("layer: {}", engine.layer_name(l)),
-                Output::CapsWord(on) => println!("caps word: {}", if on { "on" } else { "off" }),
-                Output::System(s) => println!("system: {s:?} (not simulated)"),
-                Output::Mouse(m, down) => println!(
-                    "mouse: {m:?} {} (not simulated)",
-                    if down { "down" } else { "up" }
-                ),
-                Output::Pointer(on) => println!("pointer: {}", if on { "active" } else { "off" }),
-            }
-        }
+        drain(&mut engine, &mut host, vdev.as_mut(), verbose)?;
     }
 
     if let Some(v) = vdev.as_mut() {
@@ -240,5 +193,94 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         dev.ungrab()?;
     }
     println!("bye");
+    Ok(())
+}
+
+/// `--list`: the keyboards this machine has, one per line.
+fn list_keyboards() {
+    for (path, dev) in evdev::enumerate().filter(|(_, d)| is_keyboard(d)) {
+        println!("{}\t{}", path.display(), dev.name().unwrap_or("?"));
+    }
+}
+
+/// The virtual keyboard the keymap types on, with the physical one grabbed;
+/// `None` in watch mode, which only listens.
+fn take_over(
+    args: &Args,
+    dev: &mut Device,
+) -> Result<Option<VirtualDevice>, Box<dyn std::error::Error>> {
+    if args.watch {
+        println!("watch mode: not grabbing, not typing");
+        return Ok(None);
+    }
+    let v = virtual_keyboard().map_err(|e| {
+        format!("cannot create virtual keyboard via /dev/uinput: {e} (see README: Permissions)")
+    })?;
+    wait_for_all_keys_up(dev);
+    dev.grab()?;
+    println!("grabbed. Typing goes through your Corne keymap. Physical Esc quits.");
+    Ok(Some(v))
+}
+
+/// Hand the waiting key events of `dev` to the engine. False once the quit
+/// key is pressed.
+fn feed_keys(
+    dev: &mut Device,
+    engine: &mut Engine<'_, { corne::KEYS }>,
+    now: &impl Fn() -> u32,
+) -> std::io::Result<bool> {
+    for ev in dev.fetch_events()? {
+        if ev.event_type() != EventType::KEY {
+            continue;
+        }
+        let (code, value) = (ev.code(), ev.value());
+        if code == layout::QUIT_KEY && value == 1 {
+            return Ok(false);
+        }
+        match (layout::position(code), value) {
+            (Some(pos), 1) => engine.press(pos, now()),
+            (Some(pos), 0) => engine.release(pos, now()),
+            _ => {} // autorepeat (2) or a key outside the Corne grid
+        }
+    }
+    Ok(true)
+}
+
+/// Print what the engine says besides key reports.
+fn print_output(engine: &Engine<'_, { corne::KEYS }>, out: Output) {
+    match out {
+        Output::Report(_) => {}
+        Output::Layer(l) => println!("layer: {}", engine.layer_name(l)),
+        Output::CapsWord(on) => println!("caps word: {}", if on { "on" } else { "off" }),
+        Output::System(s) => println!("system: {s:?} (not simulated)"),
+        Output::Mouse(m, down) => println!(
+            "mouse: {m:?} {} (not simulated)",
+            if down { "down" } else { "up" }
+        ),
+        Output::Pointer(on) => println!("pointer: {}", if on { "active" } else { "off" }),
+    }
+}
+
+/// Act on everything the engine has to say: type the reports on `vdev`
+/// (`host` is what it last typed) and print the rest.
+fn drain(
+    engine: &mut Engine<'_, { corne::KEYS }>,
+    host: &mut Report,
+    mut vdev: Option<&mut VirtualDevice>,
+    verbose: bool,
+) -> std::io::Result<()> {
+    while let Some(out) = engine.poll() {
+        if let Output::Report(r) = out {
+            if verbose {
+                println!("  {}", describe(host, &r));
+            }
+            if let Some(v) = vdev.as_deref_mut() {
+                send(v, host, &r)?;
+            }
+            *host = r;
+        } else {
+            print_output(engine, out);
+        }
+    }
     Ok(())
 }
