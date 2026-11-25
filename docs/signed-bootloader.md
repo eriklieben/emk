@@ -385,7 +385,7 @@ between versions.
   5. Pair everything again (5.2). If the key was lost: generate a new one, rebuild the bootloader, and
      use the `-signed_s140_6.1.1.hex` built with it in step 2.
 
-### 5.4 Going back to a UF2 bootloader without a probe (untested)
+### 5.4 Going back to a UF2 bootloader without a probe
 
 `build-bootloader` also makes `target/bootloader/rollback-to-uf2-nice_nano_bootloader-0.11.0.zip`.
 This is a **signed bootloader package** (device revision 52840, `--sd-req 0x00B6`) containing the
@@ -400,8 +400,8 @@ bootloader-swap path (MBR `COPY_BL`), and that erases the app:
 
 Success: after a reset the `NICENANO` drive is back (`INFO_UF2.TXT`: 0.11.0) with no app. Change
 `signed` to `uf2` in `.hil-halves` by hand (otherwise `./hil` raises the tamper alarm, as it
-should), then `./hil flash left` with the `.uf2`. The package passes `dfu-verify.py`, but this path
-has **not been tried on hardware**. Try it on the spare before you rely on it.
+should), then `./hil flash left` with the `.uf2`. Tried on a spare
+board (section 7); try it on a spare again after rebuilding the bootloader.
 
 ---
 
@@ -444,14 +444,23 @@ Verified without hardware (2026-11-15):
   init-packet byte and an unsigned package are all refused. The throwaway package passes against its
   own key (so the check isn't just always failing).
 
-Not verified, needs hardware:
+Verified on hardware (2026-11-25), on a spare HW-954 nice!nano clone (nRF52840 `QIAAD0`, shipped
+with UF2 bootloader 0.6.0 and S140 6.1.1), not on a keyboard half:
 
-- That the 0.6.0 → 0.11.0 self-update works on these boards (it is the documented Adafruit path, and
-  the layout, board ID and UICR checks match).
-- That the bootloader really refuses on the chip (tinycrypt `uECC_verify` vs. OpenSSL is the same
-  math, but not the same code), section 3.5.
-- The exact `ID_USB_INTERFACES` strings, nrfutil's output wording, and that the 3 s timeout leaves
-  enough time with USBGuard.
-- The rollback package (5.4) and every probe-rs command (5.3).
+- The 0.6.0 → 0.11.0 signed self-update (3.2): `./hil flash` copied the update UF2, the app started
+  again and logged `boot: bootloader 0.11.0`.
+- The bootloader check (3.3): no drive after a double-tap or `./hil bootinfo`, CDC only
+  (`ID_USB_INTERFACES=:020200:0a0000:`, so `00` rather than `01` in the CDC protocol field).
+- A signed update (3.4): `Device programmed.`, the app started, `.hil-halves` noted `signed`.
+- Refusing a package signed with a throwaway key (3.5): nrfutil failed, the bootloader reset into
+  DFU without an app; the real package went on again afterwards.
+- The rollback package (5.4): `Device programmed.`, then the `NICENANO` drive was back with
+  `UF2 Bootloader 0.11.0`, no app; after changing `.hil-halves` back to `uf2`, `./hil flash` with
+  the `.uf2` worked as before.
+
+Not verified:
+
+- The same on a keyboard half (a genuine nice!nano, which may have a different chip revision).
+- Every probe-rs command (5.3): no probe was connected.
 - That `Debug::Disallowed` locks these chips as described (it depends on the build code; check FICR
   `INFO.VARIANT` first, security-review tier 1 step 3).
