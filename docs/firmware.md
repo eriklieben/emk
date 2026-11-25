@@ -38,6 +38,10 @@ older interfaces never move:
 
 The app's `HardwarePort` and `./hil` find the log port as before (`-if0*`, USB vendor ID).
 
+Five interfaces is more than `embassy-usb` allows by default (4 interfaces and 4 handlers, then
+`Builder` panics). `fw-nrf/Cargo.toml` raises both to 6; a new interface needs those limits raised
+first.
+
 ## Messages from the computer (Raw HID)
 
 `kbnotify` (see the [README](../README.md#messages-from-the-computer)) writes 32-byte output
@@ -133,6 +137,23 @@ sudo udevadm control --reload && sudo udevadm trigger
 | `./hil wait 'split: linked'` | wait until a log line matches |
 | `./hil pc` | the PC's view: Bluetooth pairing/connection and input devices |
 | `./hil test` | smoke test: halves linked, a muted key tap reaches the output |
+
+## When a half doesn't start
+
+- **Crash report.** A panic or a fault of the processor is written to RAM that survives the
+  reset (`src/diag.rs`); the next start reports it before anything else runs: over USB on the log
+  port (`./hil log` shows `previous run crashed: <file:line> <message>`, or
+  `hard fault at pc=… lr=…`, which `addr2line -e fw-nrf/target/thumbv7em-none-eabihf/release/fw-nrf`
+  turns into a line), on the screen for the right half over Bluetooth. The keys stay off; a single
+  reset clears it.
+- **No USB at all** (a bare board, a hang before USB): `STAGE_LED=1 ./fw-nrf/build-uf2 <name>`
+  builds `...-stageled` firmware that blinks the last start step reached on the LED on P0.15
+  (`src/stage_led.rs`, steps numbered with `reached!` in `src/main.rs`): `n` blinks and a pause.
+  On the HW-954 clone that LED is the red one; the blue one is the charger's and blinks without a
+  battery.
+- **Double-tap on a board without a reset button:** short RST to the GND pin next to it twice,
+  quickly. With USBGuard, allow the bootloader within a second or two, or it gives up and starts
+  the firmware again.
 
 ## Pins
 

@@ -8,6 +8,8 @@
 #   BLE=1 SIDE=right ./fw-nrf/build-uf2 erik_kyb_grs
 #   LOG=0 ...                                    without the USB serial log (src/log.rs)
 #   SIGNED=1 ...                                 `boot` asks for serial DFU (feature signed-boot)
+#   STAGE_LED=1 ...                              diagnostic: the LED blinks the last start step
+#                                                (feature stage-led, outputs named ...-stageled)
 #   LOCK=1 ...                                   lock the debug port at first start (feature debug-lock,
 #                                                outputs named ...-locked; see docs/signed-bootloader.md)
 #
@@ -39,6 +41,7 @@ locked=""
 if [[ "${BLE:-0}" == 1 ]]; then mode=ble; suffix="-ble"; fi
 [[ "${SIGNED:-0}" == 1 ]] && extra+=",signed-boot"
 if [[ "${LOCK:-0}" == 1 ]]; then extra+=",debug-lock"; locked="-locked"; fi
+if [[ "${STAGE_LED:-0}" == 1 ]]; then extra+=",stage-led"; locked+="-stageled"; fi
 names=("$@")
 [[ ${#names[@]} -eq 0 ]] && names=(erik_kyb_blk erik_kyb_wh erik_kyb_grs)
 

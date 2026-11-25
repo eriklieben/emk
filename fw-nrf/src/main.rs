@@ -29,6 +29,17 @@ mod ble;
 mod diag;
 #[cfg(all(feature = "usb-log", not(all(feature = "ble", feature = "right"))))]
 mod logport;
+#[cfg(feature = "stage-led")]
+mod stage_led;
+
+/// A step of the start, blinked on the LED in the diagnostic build
+/// (feature `stage-led`, `src/stage_led.rs`); nothing in other builds.
+macro_rules! reached {
+    ($n:expr) => {
+        #[cfg(feature = "stage-led")]
+        stage_led::reached($n);
+    };
+}
 mod matrix;
 mod oled;
 mod sleep;
@@ -275,17 +286,33 @@ pub(crate) fn start<S>(
 
 #[panic_handler]
 fn panic(info: &PanicInfo) -> ! {
+    #[cfg(feature = "stage-led")]
+    {
+        let _ = info;
+        stage_led::crashed(stage_led::Crash::Panic)
+    }
+    #[cfg(not(feature = "stage-led"))]
     diag::record_and_reset(info)
+}
+
+/// A fault of the processor itself: record where, then reset, like a panic.
+#[cfg(not(feature = "stage-led"))]
+#[cortex_m_rt::exception]
+unsafe fn HardFault(frame: &cortex_m_rt::ExceptionFrame) -> ! {
+    diag::record_fault_and_reset(frame.pc(), frame.lr())
 }
 
 #[embassy_executor::main]
 async fn main(spawner: Spawner) {
+    #[cfg(feature = "stage-led")]
+    stage_led::init();
     #[cfg(feature = "ble")]
     static FLASH: StaticCell<BleFlash> = StaticCell::new();
     // The Adafruit bootloader leaves its version in TIMER2.CC[0] (0x00MMmmpp)
     // right before it starts us; nothing has used TIMER2 since.
     let bootloader = embassy_nrf::pac::TIMER2.cc(0).read();
     let p = embassy_nrf::init(nrf_config());
+    reached!(2);
     #[cfg(feature = "ble")]
     {
         use embassy_nrf::interrupt::{InterruptExt, Priority};
@@ -299,19 +326,37 @@ async fn main(spawner: Spawner) {
         .icachecnf()
         .write(|w| w.set_cacheen(true));
 
+    // Crashed last time? Report it before anything else starts, since that
+    // may be what crashed: over USB (the log port repeats it, `./hil log`),
+    // so it can be read on a bare board too; the right half over Bluetooth
+    // has no USB and shows it on its screen (below). The keys stay off.
+    #[cfg(not(all(feature = "ble", feature = "right")))]
+    if let Some(crash) = diag::take_crash() {
+        #[cfg(feature = "stage-led")]
+        stage_led::crash_waiting();
+        report_crash(spawner, p.USBD, crash).await;
+    }
+
     // VCC to the OLED (nice!nano EXT_POWER, P0.13).
     let ext_power = Output::new(p.P0_13, Level::High, OutputDrive::Standard);
+    reached!(3);
     start_display(spawner, p.TWISPI0, p.P0_17, p.P0_20);
+    reached!(4);
     log_boot(bootloader);
-    // Crashed last time? Show where, and stop here so it can be read.
+    reached!(5);
+    #[cfg(all(feature = "ble", feature = "right"))]
     if let Some(crash) = diag::take_crash() {
+        #[cfg(feature = "stage-led")]
+        stage_led::crash_waiting();
         dlog!("previous run crashed: {}", crash.as_str());
         diag::MESSAGE.signal(("PANIC", crash));
         loop {
             Timer::after(Duration::from_secs(3600)).await;
         }
     }
+    reached!(6);
     start_battery(spawner, p.SAADC);
+    reached!(7);
 
     // Matrix: columns driven high one at a time, rows read with pull-downs (diodes col → row).
     // Same pins on both halves (Pro Micro D21 D20 D19 D18 D15 D14), in ZMK's
@@ -342,6 +387,7 @@ async fn main(spawner: Spawner) {
         Input::new(p.P0_11, Pull::Down),
     ];
 
+    reached!(8);
     // Outermost top key held while starting: forget the bond with the other half.
     #[cfg(feature = "ble")]
     let cols = {
@@ -357,6 +403,8 @@ async fn main(spawner: Spawner) {
         }
         cols
     };
+    #[cfg(feature = "ble")]
+    reached!(9);
     #[cfg(feature = "ble")]
     diag::stage("radio").await;
     #[cfg(feature = "ble")]
@@ -386,6 +434,8 @@ async fn main(spawner: Spawner) {
         (radio, flash)
     };
 
+    #[cfg(feature = "ble")]
+    reached!(10);
     // Right half over Bluetooth: no USB keyboard here, the left half types.
     #[cfg(all(feature = "ble", feature = "right"))]
     {
@@ -401,6 +451,7 @@ async fn main(spawner: Spawner) {
             diag::stage("split").await;
             start(spawner, split_central_task(radio.sdc, flash));
             // USB needs the 32 MHz crystal, which MPSL owns: keep it requested.
+            reached!(11);
             diag::stage("hfclk").await;
             radio
                 .mpsl
@@ -418,6 +469,7 @@ async fn main(spawner: Spawner) {
             start(spawner, vbus_task(vbus));
             vbus
         };
+        reached!(12);
         diag::stage("usb").await;
         // The UF2 bootloader was a USB drive a moment ago and can hand over with
         // USB still set up; the first start after flashing then hung until the
@@ -434,7 +486,36 @@ async fn main(spawner: Spawner) {
             });
         }
         start_usb(spawner, p.USBD, vbus);
+        reached!(13);
         run_keyboard(cols, rows, ext_power).await;
+    }
+}
+
+/// Repeat the crash report from the previous run on the USB log port, forever.
+#[cfg(not(all(feature = "ble", feature = "right")))]
+async fn report_crash(
+    spawner: Spawner,
+    usbd: Peri<'static, peripherals::USBD>,
+    crash: diag::Text,
+) -> ! {
+    #[cfg(not(feature = "ble"))]
+    let vbus = HardwareVbusDetect::new(Irqs);
+    #[cfg(feature = "ble")]
+    let vbus = {
+        static VBUS: StaticCell<SoftwareVbusDetect> = StaticCell::new();
+        // No MPSL in this path: start the 32 MHz crystal USB needs ourselves,
+        // and take the cable as present (it powers the board).
+        let clock = embassy_nrf::pac::CLOCK;
+        clock.events_hfclkstarted().write_value(0);
+        clock.tasks_hfclkstart().write_value(1);
+        while clock.events_hfclkstarted().read() == 0 {}
+        let vbus: &'static SoftwareVbusDetect = VBUS.init(SoftwareVbusDetect::new(true, true));
+        vbus
+    };
+    start_usb(spawner, usbd, vbus);
+    loop {
+        dlog!("previous run crashed: {}", crash.as_str());
+        Timer::after(Duration::from_secs(2)).await;
     }
 }
 

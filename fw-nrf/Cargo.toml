@@ -40,6 +40,9 @@ signed-boot = []
 # full chip erase over SWD, which also erases the bonds and the bootloader.
 # Only after the signed bootloader is proven on that half (build: LOCK=1).
 debug-lock = []
+# Diagnostic build: the LED blinks the last start step reached, flickers on a
+# crash (src/stage_led.rs). For boards without a screen; build: STAGE_LED=1.
+stage-led = []
 
 # The same lint levels as the main workspace (../Cargo.toml, [workspace.lints]).
 [lints.rust]
@@ -66,7 +69,9 @@ embassy-futures = "0.1.2"
 embassy-nrf = { version = "0.11.0", features = ["nrf52840", "time-driver-rtc1", "gpiote", "time", "unstable-pac"] }
 embassy-sync = "0.8.0"
 embassy-time = "0.5.1"
-embassy-usb = "0.6.0"
+# Room for keyboard, mouse, log port (2 interfaces) and Raw HID: the default
+# of 4 interfaces and 4 handlers panics in Builder at the fifth.
+embassy-usb = { version = "0.6.0", features = ["max-interface-count-6", "max-handler-count-6"] }
 kb-ble = { path = "../ble" }
 kb-core = { path = "../core" }
 kb-display = { path = "../display" }

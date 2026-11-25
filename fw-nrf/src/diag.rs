@@ -77,6 +77,10 @@ pub async fn stage(name: &'static str) {
 }
 
 /// Record the panic (<file:line> and message) for the next boot, then reset.
+#[cfg_attr(
+    feature = "stage-led",
+    allow(dead_code, reason = "the diagnostic build blinks the LED instead")
+)]
 pub fn record_and_reset(info: &PanicInfo) -> ! {
     let mut text = Text::new("");
     if let Some(loc) = info.location() {
@@ -84,6 +88,23 @@ pub fn record_and_reset(info: &PanicInfo) -> ! {
         let _ = write!(text, "{}:{} ", file, loc.line());
     }
     let _ = write!(text, "{}", info.message());
+    store_and_reset(&text)
+}
+
+/// Record a fault of the processor itself (where it happened: the program
+/// counter and the return address) for the next boot, then reset. Look the
+/// addresses up with `addr2line -e fw-nrf/target/thumbv7em-none-eabihf/release/fw-nrf`.
+#[cfg_attr(
+    feature = "stage-led",
+    allow(dead_code, reason = "the diagnostic build blinks the LED instead")
+)]
+pub fn record_fault_and_reset(pc: u32, lr: u32) -> ! {
+    let mut text = Text::new("");
+    let _ = write!(text, "hard fault at pc=0x{pc:08x} lr=0x{lr:08x}");
+    store_and_reset(&text)
+}
+
+fn store_and_reset(text: &Text) -> ! {
     // SAFETY: single core, interrupts are irrelevant this close to reset; the
     // record is plain bytes.
     unsafe {
